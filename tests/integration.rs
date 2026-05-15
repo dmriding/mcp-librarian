@@ -452,6 +452,37 @@ fn malformed_toml_returns_parse_error() {
     );
 }
 
+// --- search surfaces manifest-only servers (Fix 3) ---
+
+#[test]
+fn list_manifest_servers_lets_search_find_them() {
+    // Indirect test: list_manifest_servers + manifest content should be enough
+    // for search to surface a server even when it has no indexed tools.
+    let (_tmp, paths) = temp_paths();
+    let manifest = Manifest {
+        meta: ManifestMeta {
+            category: Some("developer-tools".into()),
+            summary: Some("Repository management — issues, PRs, files".into()),
+            paired_cli: None,
+        },
+        workflows: vec![ManifestWorkflow {
+            title: "Browse files in a repo".into(),
+            body: "...".into(),
+        }],
+        ..Default::default()
+    };
+    playbook::write_manifest(&paths, "github", &manifest).unwrap();
+
+    // The list scanner finds it
+    let servers = playbook::list_manifest_servers(&paths).unwrap();
+    assert!(servers.contains(&"github".to_string()));
+
+    // And loading the manifest gives us the searchable content
+    let loaded = playbook::load_manifest(&paths, "github").unwrap().unwrap();
+    assert!(loaded.meta.summary.as_deref().is_some_and(|s| s.contains("Repository")));
+    assert!(loaded.workflows.iter().any(|w| w.title.contains("repo")));
+}
+
 // --- virtual topics (Fix 2) ---
 
 #[test]
