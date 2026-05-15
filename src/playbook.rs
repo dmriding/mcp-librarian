@@ -1,0 +1,846 @@
+use anyhow::{Context, Result};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::fmt::Write;
+use std::path::Path;
+
+use crate::config::Paths;
+use crate::index::{IndexedTool, Note, NoteBasis, NoteKind, ProbeStatus, ServerEntry};
+
+// =================== Manifest ===================
+
+#[derive(Debug, Default, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct Manifest {
+    #[serde(default)]
+    pub meta: ManifestMeta,
+    #[serde(default)]
+    pub topics: Vec<ManifestTopic>,
+    #[serde(default)]
+    pub workflows: Vec<ManifestWorkflow>,
+    #[serde(default)]
+    pub tool_categories: Vec<ManifestCategory>,
+    #[serde(default)]
+    pub gotchas: Vec<String>,
+}
+
+#[derive(Debug, Default, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct ManifestMeta {
+    /// Bucket the server falls into in `librarian_list` (e.g. "comms", "knowledge", "browser").
+    #[serde(default)]
+    pub category: Option<String>,
+    /// One-sentence description, used as the server's blurb in `librarian_list`.
+    #[serde(default)]
+    pub summary: Option<String>,
+    /// Optional path/name of a paired CLI binary. Reserved for future CLI playbook generation.
+    #[serde(default)]
+    pub paired_cli: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct ManifestTopic {
+    /// Short slug used as the `topic` argument to `librarian_help`.
+    pub name: String,
+    /// Human-readable title for the topic page.
+    pub title: String,
+    /// Markdown body of the topic.
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct ManifestWorkflow {
+    /// Title shown in the workflows section of the overview.
+    pub title: String,
+    /// Markdown body — typically a numbered call sequence.
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct ManifestCategory {
+    /// Category name shown in the overview's tool list.
+    pub name: String,
+    /// Tool names that belong to this category.
+    pub tools: Vec<String>,
+}
+
+/// Check whether a manifest has any meaningful content. Used as a safety
+/// net before writing — refuses to clobber a curated manifest with an empty one.
+pub fn manifest_is_empty(m: &Manifest) -> bool {
+    m.meta.category.is_none()
+        && m.meta.summary.is_none()
+        && m.meta.paired_cli.is_none()
+        && m.topics.is_empty()
+        && m.workflows.is_empty()
+        && m.tool_categories.is_empty()
+        && m.gotchas.is_empty()
+}
+
+pub fn load_manifest(paths: &Paths, server: &str) -> Result<Option<Manifest>> {
+    let path = paths.manifest_path(server);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read_to_string(&path)
+        .with_context(|| format!("reading {}", path.display()))?;
+    let manifest: Manifest = toml::from_str(&bytes)
+        .with_context(|| format!("parsing {}", path.display()))?;
+    Ok(Some(manifest))
+}
+
+#[allow(dead_code)]
+pub fn manifest_path_for(paths: &Paths, server: &str) -> std::path::PathBuf {
+    paths.manifest_path(server)
+}
+
+// =================== Rendering: librarian_list ===================
+
+pub fn render_list(entries: &[(ServerEntry, Option<Manifest>)], category_filter: Option<&str>) -> String {
+    let mut buckets: BTreeMap<String, Vec<&(ServerEntry, Option<Manifest>)>> = BTreeMap::new();
+    for pair in entries {
+        let cat = pair
+            .1
+            .as_ref()
+            .and_then(|m| m.meta.category.clone())
+            .unwrap_or_else(|| "uncategorized".to_string());
+        if let Some(filter) = category_filter
+            && !cat.eq_ignore_ascii_case(filter)
+        {
+            continue;
+        }
+        buckets.entry(cat).or_default().push(pair);
+    }
+
+    let mut out = String::new();
+    out.push_str("# MCP Server Index\n\n");
+
+    if buckets.is_empty() {
+        out.push_str("*(no servers found)*\n");
+    } else {
+        for (cat, mut items) in buckets {
+            items.sort_by(|a, b| a.0.name.cmp(&b.0.name));
+            let _ = writeln!(out, "## {cat}\n");
+            for (entry, manifest) in items {
+                let summary = manifest
+                    .as_ref()
+                    .and_then(|m| m.meta.summary.clone())
+                    .or_else(|| entry.summary.clone())
+                    .or_else(|| auto_summary(entry))
+                    .unwrap_or_else(|| "*(no summary)*".to_string());
+                let probe_marker = match &entry.probe_status {
+                    ProbeStatus::Ok => "",
+                    ProbeStatus::Seeded => " (seeded)",
+                    ProbeStatus::NotProbeable => " (remote)",
+                    ProbeStatus::Timeout => " (probe timed out)",
+                    ProbeStatus::Failed(_) => " (probe failed)",
+                };
+                let _ = writeln!(out, "- **{}**{} — {summary}", entry.name, probe_marker);
+            }
+            out.push('\n');
+        }
+    }
+
+    out.push_str("---\n");
+    out.push_str("*Call `librarian_help(server)` for details. ");
+    out.push_str("`librarian_help(server, topic)` for a deep dive. ");
+    out.push_str("`librarian_search(query)` if unsure which server has the tool you need.*\n");
+    out
+}
+
+fn auto_summary(entry: &ServerEntry) -> Option<String> {
+    if entry.tools.is_empty() {
+        return None;
+    }
+    let n = entry.tools.len();
+    let first: Vec<&str> = entry.tools.iter().take(3).map(|t| t.name.as_str()).collect();
+    Some(format!(
+        "{n} tools (e.g. {})",
+        first.join(", ")
+    ))
+}
+
+// =================== Rendering: librarian_help ===================
+
+pub fn render_help(
+    entry: &ServerEntry,
+    manifest: Option<&Manifest>,
+    notes: &[Note],
+    topic: Option<&str>,
+) -> String {
+    match topic {
+        None => render_overview(entry, manifest, notes),
+        Some(t) => render_topic(entry, manifest, notes, t),
+    }
+}
+
+fn render_overview(entry: &ServerEntry, manifest: Option<&Manifest>, notes: &[Note]) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "# {} Playbook", entry.name);
+    out.push('\n');
+
+    // Summary
+    if let Some(summary) = manifest.and_then(|m| m.meta.summary.as_deref()) {
+        let _ = writeln!(out, "{summary}\n");
+    }
+
+    // Probe-status banner if not OK
+    match &entry.probe_status {
+        ProbeStatus::Ok | ProbeStatus::Seeded => {}
+        ProbeStatus::NotProbeable => out.push_str(
+            "> *Remote/cloud server — schema was not probed. Coverage comes from manifest and learned notes.*\n\n",
+        ),
+        ProbeStatus::Timeout => out.push_str(
+            "> *Probe timed out. Schema list may be stale; try `librarian_refresh`.*\n\n",
+        ),
+        ProbeStatus::Failed(msg) => {
+            let _ = writeln!(out, "> *Probe failed: {msg}. Using manifest + learned notes only.*\n");
+        }
+    }
+
+    // Workflows: manifest first, then workflow-kind observed notes
+    let workflow_notes: Vec<&Note> = notes
+        .iter()
+        .filter(|n| n.kind == NoteKind::Workflow && n.basis == NoteBasis::Observed)
+        .collect();
+    let has_workflows = manifest.map(|m| !m.workflows.is_empty()).unwrap_or(false)
+        || !workflow_notes.is_empty();
+    if has_workflows {
+        out.push_str("## Key Workflows\n\n");
+        if let Some(m) = manifest {
+            for wf in &m.workflows {
+                let _ = writeln!(out, "### {}\n\n{}\n", wf.title, wf.body.trim_end());
+            }
+        }
+        for note in &workflow_notes {
+            let stale = if note.possibly_stale { " ⚠possibly stale" } else { "" };
+            let _ = writeln!(
+                out,
+                "- *(learned {}{})* {}",
+                note.timestamp.format("%Y-%m-%d"),
+                stale,
+                note.claim
+            );
+        }
+        out.push('\n');
+    }
+
+    // Tool categories
+    if !entry.tools.is_empty() {
+        out.push_str("## Tool Categories\n\n");
+        let groups = group_tools(entry, manifest);
+        for (cat, tools) in &groups {
+            let names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
+            let _ = writeln!(out, "- **{cat}**: {}", names.join(", "));
+        }
+        out.push('\n');
+    }
+
+    // Gotchas: manifest + behavior/error notes
+    let gotcha_notes: Vec<&Note> = notes
+        .iter()
+        .filter(|n| {
+            matches!(n.kind, NoteKind::Behavior | NoteKind::ErrorPattern | NoteKind::Tip)
+                && n.basis == NoteBasis::Observed
+        })
+        .collect();
+    let has_gotchas =
+        manifest.map(|m| !m.gotchas.is_empty()).unwrap_or(false) || !gotcha_notes.is_empty();
+    if has_gotchas {
+        out.push_str("## Important Gotchas\n\n");
+        if let Some(m) = manifest {
+            for g in &m.gotchas {
+                let _ = writeln!(out, "- {g}");
+            }
+        }
+        for n in &gotcha_notes {
+            let stale = if n.possibly_stale { " ⚠" } else { "" };
+            let _ = writeln!(
+                out,
+                "- *(learned {}{})* {}",
+                n.timestamp.format("%Y-%m-%d"),
+                stale,
+                n.claim
+            );
+        }
+        out.push('\n');
+    }
+
+    // Inferred (speculative) notes — separate, weaker section
+    let inferred: Vec<&Note> = notes.iter().filter(|n| n.basis == NoteBasis::Inferred).collect();
+    if !inferred.is_empty() {
+        out.push_str("## Inferred (unverified)\n\n");
+        for n in &inferred {
+            let stale = if n.possibly_stale { " ⚠" } else { "" };
+            let _ = writeln!(
+                out,
+                "- *(inferred {}{})* {}",
+                n.timestamp.format("%Y-%m-%d"),
+                stale,
+                n.claim
+            );
+        }
+        out.push('\n');
+    }
+
+    // Topics footer
+    if let Some(m) = manifest
+        && !m.topics.is_empty()
+    {
+        out.push_str("## Available Topics\n\n");
+        for t in &m.topics {
+            let _ = writeln!(out, "- **{}** — {}", t.name, t.title);
+        }
+        let _ = writeln!(
+            out,
+            "\nCall `librarian_help(\"{}\", topic)` for detailed guidance on any topic.",
+            entry.name
+        );
+    }
+
+    out
+}
+
+fn render_topic(
+    entry: &ServerEntry,
+    manifest: Option<&Manifest>,
+    notes: &[Note],
+    topic: &str,
+) -> String {
+    let mut out = String::new();
+    let manifest_topic = manifest
+        .and_then(|m| m.topics.iter().find(|t| t.name.eq_ignore_ascii_case(topic)));
+
+    let title = manifest_topic
+        .map(|t| t.title.clone())
+        .unwrap_or_else(|| topic.to_string());
+    let _ = writeln!(out, "# {} — {}", entry.name, title);
+    out.push('\n');
+
+    if let Some(t) = manifest_topic {
+        let _ = writeln!(out, "{}\n", t.body.trim_end());
+    } else {
+        out.push_str(
+            "> *No manifest topic by that name. Showing related learned notes only.*\n\n",
+        );
+    }
+
+    // Related notes for this topic
+    let related: Vec<&Note> = notes
+        .iter()
+        .filter(|n| n.topic.as_deref().is_some_and(|t| t.eq_ignore_ascii_case(topic)))
+        .collect();
+    if !related.is_empty() {
+        out.push_str("## Related Notes\n\n");
+        let (observed, inferred): (Vec<&Note>, Vec<&Note>) =
+            related.iter().copied().partition(|n| n.basis == NoteBasis::Observed);
+        for n in observed {
+            let stale = if n.possibly_stale { " ⚠" } else { "" };
+            let _ = writeln!(
+                out,
+                "- *(observed {}{})* {}",
+                n.timestamp.format("%Y-%m-%d"),
+                stale,
+                n.claim
+            );
+        }
+        if !inferred.is_empty() {
+            out.push_str("\n*Inferred:*\n");
+            for n in inferred {
+                let stale = if n.possibly_stale { " ⚠" } else { "" };
+                let _ = writeln!(
+                    out,
+                    "- *(inferred {}{})* {}",
+                    n.timestamp.format("%Y-%m-%d"),
+                    stale,
+                    n.claim
+                );
+            }
+        }
+    }
+
+    // If the topic name matches a tool category, render the tools
+    let category = manifest
+        .and_then(|m| m.tool_categories.iter().find(|c| c.name.eq_ignore_ascii_case(topic)));
+    if let Some(cat) = category {
+        out.push_str("\n## Tools in this category\n\n");
+        for tool_name in &cat.tools {
+            if let Some(tool) = entry.tools.iter().find(|t| &t.name == tool_name) {
+                render_tool_detail(&mut out, tool);
+            }
+        }
+    } else if manifest_topic.is_none() && related.is_empty() {
+        // Last-resort: maybe the topic *is* a tool name. Render its detail.
+        if let Some(tool) = entry.tools.iter().find(|t| t.name.eq_ignore_ascii_case(topic)) {
+            out.push_str("\n## Tool detail\n\n");
+            render_tool_detail(&mut out, tool);
+        }
+    }
+
+    out
+}
+
+fn render_tool_detail(out: &mut String, tool: &IndexedTool) {
+    let _ = writeln!(out, "### `{}`", tool.name);
+    if !tool.description.is_empty() {
+        let _ = writeln!(out, "{}\n", tool.description.trim());
+    }
+    if let Some(args) = &tool.arg_summary {
+        if !args.required.is_empty() {
+            let _ = writeln!(out, "**Required:** {}", args.required.join(", "));
+        }
+        let optional: Vec<&String> = args
+            .properties
+            .keys()
+            .filter(|k| !args.required.contains(*k))
+            .collect();
+        if !optional.is_empty() {
+            let optional_names: Vec<String> = optional.iter().map(|s| (*s).clone()).collect();
+            let _ = writeln!(out, "**Optional:** {}", optional_names.join(", "));
+        }
+        out.push_str("\n```\n");
+        for (k, v) in &args.properties {
+            let _ = writeln!(out, "{k}: {v}");
+        }
+        out.push_str("```\n\n");
+    }
+}
+
+// =================== Tool grouping ===================
+
+fn group_tools<'a>(
+    entry: &'a ServerEntry,
+    manifest: Option<&'a Manifest>,
+) -> BTreeMap<String, Vec<&'a IndexedTool>> {
+    let mut groups: BTreeMap<String, Vec<&IndexedTool>> = BTreeMap::new();
+
+    // If manifest defines categories, honor them.
+    if let Some(m) = manifest
+        && !m.tool_categories.is_empty()
+    {
+        let mut placed = std::collections::HashSet::new();
+        for cat in &m.tool_categories {
+            let mut bucket = Vec::new();
+            for name in &cat.tools {
+                if let Some(t) = entry.tools.iter().find(|t| &t.name == name) {
+                    bucket.push(t);
+                    placed.insert(t.name.clone());
+                }
+            }
+            if !bucket.is_empty() {
+                groups.insert(cat.name.clone(), bucket);
+            }
+        }
+        // Anything not placed goes to "other"
+        let other: Vec<&IndexedTool> = entry
+            .tools
+            .iter()
+            .filter(|t| !placed.contains(&t.name))
+            .collect();
+        if !other.is_empty() {
+            groups.insert("other".to_string(), other);
+        }
+        return groups;
+    }
+
+    // Otherwise: auto-group by prefix (first underscore- or hyphen-separated token).
+    for tool in &entry.tools {
+        let prefix = prefix_of(&tool.name);
+        groups.entry(prefix).or_default().push(tool);
+    }
+    // If everything went into "misc" (e.g. one-token names), keep it.
+    groups
+}
+
+fn prefix_of(name: &str) -> String {
+    let token = name
+        .split(['_', '-'])
+        .next()
+        .unwrap_or(name);
+    if token.is_empty() || token == name {
+        "misc".to_string()
+    } else {
+        token.to_string()
+    }
+}
+
+// =================== Self help ===================
+
+pub fn render_self() -> String {
+    let mut s = String::new();
+    s.push_str("# librarian — Playbook\n\n");
+    s.push_str(
+        "Index of your other MCP servers. One tool call returns a directory; \
+         drill-down playbooks are paid for only when you need them. Designed to \
+         get smarter as you use it.\n\n",
+    );
+    s.push_str("## Tool Categories\n\n");
+    s.push_str("- **Read**: librarian_list, librarian_help, librarian_search, librarian_manifest_diff\n");
+    s.push_str("- **Write**: librarian_note, librarian_seed_playbook, librarian_manifest_write, librarian_manifest_restore\n");
+    s.push_str("- **Fetch**: librarian_fetch_docs (read public vendor docs to bootstrap hosted-server playbooks)\n");
+    s.push_str("- **Maintenance**: librarian_refresh\n\n");
+    s.push_str("## Key Workflows\n\n");
+    s.push_str("### First-call orientation\n");
+    s.push_str("1. `librarian_list()` — landscape of all servers, grouped by category\n");
+    s.push_str("2. `librarian_help(server)` — overview for one server (workflows + categories + gotchas)\n");
+    s.push_str("3. `librarian_help(server, topic)` — drill into one workflow\n\n");
+    s.push_str("### Bootstrapping a cloud server\n");
+    s.push_str("1. You see `claude.ai_Foo` in your deferred tool list\n");
+    s.push_str("2. `librarian_seed_playbook(server=\"claude.ai_Foo\", tools_dump=...)` with the tool list you can see\n");
+    s.push_str("3. Future sessions see it via `librarian_list` and can drill into it\n\n");
+    s.push_str("### Filing what you learn\n");
+    s.push_str("1. You just used a tool and discovered a non-obvious behavior\n");
+    s.push_str("2. `librarian_note(server, kind=\"workflow\"|\"behavior\"|..., basis=\"observed\", claim=\"...\")`\n");
+    s.push_str("3. Next session sees the note attached to the right help page\n\n");
+    s.push_str("### Authoring a manifest (the curated playbook for a server)\n");
+    s.push_str("1. Construct the `Manifest` (meta, tool_categories, workflows, topics, gotchas)\n");
+    s.push_str("2. `librarian_manifest_write(server, manifest)` — WITHOUT confirm_token, returns a preview + token\n");
+    s.push_str("3. Show the preview to the user verbatim. Wait for them to type \"I agree\" or \"yes\".\n");
+    s.push_str("4. Re-call with the same manifest plus `confirm_token=...` to commit\n");
+    s.push_str("5. `librarian_manifest_diff(server)` to inspect what changed; `librarian_manifest_restore(server)` to undo\n\n");
+    s.push_str("### Bootstrapping a hosted MCP server from vendor docs\n");
+    s.push_str("For cloud/claude.ai-mediated servers the librarian can't probe directly, vendor public docs are higher-signal than the schema dump:\n");
+    s.push_str("1. `librarian_fetch_docs(url=\"https://docs.vendor.com/mcp\")` — returns cleaned doc content\n");
+    s.push_str("2. Optionally pass `extra_urls=[...]` to grab additional pages in one rate-limited call\n");
+    s.push_str("3. Read the content, synthesize a `Manifest` (meta, categories, workflows, gotchas)\n");
+    s.push_str("4. Run the `librarian_manifest_write` propose → user-approve → commit dance with that manifest\n");
+    s.push_str("5. Future sessions see the manifest via `librarian_list` and drill in via `librarian_help(server)`\n\n");
+    s.push_str("## Important Gotchas\n\n");
+    s.push_str(
+        "- **`basis: observed` vs `inferred`**: only file `observed` for things you just witnessed. \
+         `inferred` is rendered in a weaker section so future agents know to trust it less.\n",
+    );
+    s.push_str(
+        "- **`kind: workflow`** is the highest-value kind — multi-step sequences save more context \
+         than schema dumps. Prefer workflows over arg_shape notes when you can.\n",
+    );
+    s.push_str(
+        "- **Refresh is explicit**: `librarian_list` never reprobes. Call `librarian_refresh` after \
+         installing a new MCP server.\n",
+    );
+    s.push_str(
+        "- **Drift flag**: after a refresh, notes whose underlying tool schema changed get \
+         `⚠possibly stale` markers. They're not deleted — read them and decide.\n",
+    );
+    s
+}
+
+// =================== Search ===================
+
+pub fn render_search(query: &str, hits: &[(String, String, String, i64)]) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "# Search: \"{query}\"\n");
+    if hits.is_empty() {
+        out.push_str("*(no matches — try a broader query, or `librarian_list()` to browse)*\n");
+        return out;
+    }
+    for (server, tool, desc, _score) in hits {
+        let short = desc.chars().take(140).collect::<String>();
+        let _ = writeln!(out, "- **{server} / {tool}** — {short}");
+    }
+    let _ = writeln!(
+        out,
+        "\n*Call `librarian_help(server, tool)` to drill in, or use the tool's schema directly.*"
+    );
+    out
+}
+
+// =================== Manifest write preview ===================
+
+/// Render a structured preview of what `librarian_manifest_write` would write.
+/// Enumerates every concrete addition so the human reviewer has something specific
+/// to scan — confirmation theater (vague summaries) is worse than no confirmation.
+pub fn render_manifest_preview(
+    server: &str,
+    manifest: &Manifest,
+    target_path: &Path,
+    existing: Option<&Manifest>,
+) -> String {
+    let mut out = String::new();
+    out.push_str("## MANIFEST WRITE — PREVIEW (NOT YET COMMITTED)\n\n");
+    let _ = writeln!(out, "**Server:** `{server}`");
+    let _ = writeln!(out, "**Target file:** `{}`", target_path.display());
+    if existing.is_some() {
+        out.push_str("**Mode:** OVERWRITE (a manifest already exists for this server)\n\n");
+    } else {
+        out.push_str("**Mode:** CREATE (no manifest exists for this server yet)\n\n");
+    }
+
+    out.push_str("### Meta\n\n");
+    let _ = writeln!(
+        out,
+        "- `category`: {}",
+        manifest.meta.category.as_deref().unwrap_or("*(none)*")
+    );
+    let _ = writeln!(
+        out,
+        "- `summary`: {}",
+        manifest.meta.summary.as_deref().unwrap_or("*(none)*")
+    );
+    if let Some(cli) = &manifest.meta.paired_cli {
+        let _ = writeln!(out, "- `paired_cli`: {cli}");
+    }
+    out.push('\n');
+
+    if !manifest.tool_categories.is_empty() {
+        out.push_str("### Tool categories\n\n");
+        for c in &manifest.tool_categories {
+            let _ = writeln!(out, "- **{}** ({} tools): {}", c.name, c.tools.len(), c.tools.join(", "));
+        }
+        out.push('\n');
+    }
+
+    if !manifest.workflows.is_empty() {
+        out.push_str("### Workflows\n\n");
+        for w in &manifest.workflows {
+            let first_line = w.body.lines().next().unwrap_or("").trim();
+            let _ = writeln!(out, "- **{}** — first step: {}", w.title, first_line);
+        }
+        out.push('\n');
+    }
+
+    if !manifest.topics.is_empty() {
+        out.push_str("### Topics\n\n");
+        for t in &manifest.topics {
+            let _ = writeln!(out, "- **{}** — {}", t.name, t.title);
+        }
+        out.push('\n');
+    }
+
+    if !manifest.gotchas.is_empty() {
+        out.push_str("### Gotchas\n\n");
+        for g in &manifest.gotchas {
+            let _ = writeln!(out, "- {g}");
+        }
+        out.push('\n');
+    }
+
+    out
+}
+
+/// Canonical serialization for comparing two manifests by value. Used to verify
+/// that a commit-mode call carries the same content the user approved.
+pub fn manifest_fingerprint(m: &Manifest) -> String {
+    serde_json::to_string(m).unwrap_or_default()
+}
+
+// =================== Cache wrappers (convenience for server.rs) ===================
+
+#[allow(dead_code)]
+pub fn manifest_or_none(paths: &Paths, server: &str) -> Option<Manifest> {
+    load_manifest(paths, server).ok().flatten()
+}
+
+pub fn write_manifest(paths: &Paths, server: &str, manifest: &Manifest) -> Result<()> {
+    std::fs::create_dir_all(&paths.manifest_dir)?;
+    let target = paths.manifest_path(server);
+    let backup = paths.manifest_backup_path(server);
+    // Always back up the existing manifest first — one step of history is
+    // the safety net for `librarian_manifest_restore`.
+    if target.exists() {
+        std::fs::copy(&target, &backup)
+            .with_context(|| format!("backing up {} to {}", target.display(), backup.display()))?;
+    }
+    let s = toml::to_string_pretty(manifest)?;
+    std::fs::write(&target, s).with_context(|| format!("writing {}", target.display()))?;
+    Ok(())
+}
+
+/// Read the backup manifest, if any. Returns `Ok(None)` if no `.bak` file exists.
+pub fn load_manifest_backup(paths: &Paths, server: &str) -> Result<Option<Manifest>> {
+    let path = paths.manifest_backup_path(server);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read_to_string(&path)
+        .with_context(|| format!("reading {}", path.display()))?;
+    let m: Manifest = toml::from_str(&bytes)
+        .with_context(|| format!("parsing {}", path.display()))?;
+    Ok(Some(m))
+}
+
+/// Swap the current manifest with its backup. Reversible — calling restore twice
+/// in a row leaves you where you started.
+pub fn restore_manifest(paths: &Paths, server: &str) -> Result<()> {
+    let target = paths.manifest_path(server);
+    let backup = paths.manifest_backup_path(server);
+    if !backup.exists() {
+        anyhow::bail!(
+            "Error: no backup exists for `{server}`. Action: there's nothing to restore — \
+             backups are only created when a manifest is written via `librarian_manifest_write`."
+        );
+    }
+    let backup_content = std::fs::read_to_string(&backup)
+        .with_context(|| format!("reading {}", backup.display()))?;
+    let current_content = if target.exists() {
+        Some(
+            std::fs::read_to_string(&target)
+                .with_context(|| format!("reading {}", target.display()))?,
+        )
+    } else {
+        None
+    };
+    // Write backup → current
+    std::fs::write(&target, &backup_content)
+        .with_context(|| format!("writing {}", target.display()))?;
+    // Write old current → backup (so a second restore undoes this restore)
+    if let Some(c) = current_content {
+        std::fs::write(&backup, c)
+            .with_context(|| format!("writing {}", backup.display()))?;
+    }
+    Ok(())
+}
+
+/// Render a structured diff between two manifests. The output enumerates added,
+/// removed, and changed items by section so it's easy to scan.
+pub fn diff_manifests(prev: &Manifest, curr: &Manifest) -> String {
+    let mut out = String::new();
+    let mut any_changes = false;
+
+    // ----- meta -----
+    let meta_changes = diff_meta(&prev.meta, &curr.meta);
+    if !meta_changes.is_empty() {
+        any_changes = true;
+        out.push_str("## meta\n\n");
+        out.push_str(&meta_changes);
+        out.push('\n');
+    }
+
+    // ----- tool_categories (compare by name) -----
+    let cat_changes = diff_by_key(
+        &prev.tool_categories,
+        &curr.tool_categories,
+        |c| c.name.clone(),
+        |old, new| {
+            if old.tools != new.tools {
+                Some(format!(
+                    "  - was: {}\n  - now: {}",
+                    if old.tools.is_empty() { "*(empty)*".to_string() } else { old.tools.join(", ") },
+                    if new.tools.is_empty() { "*(empty)*".to_string() } else { new.tools.join(", ") },
+                ))
+            } else {
+                None
+            }
+        },
+    );
+    if !cat_changes.is_empty() {
+        any_changes = true;
+        out.push_str("## tool_categories\n\n");
+        out.push_str(&cat_changes);
+        out.push('\n');
+    }
+
+    // ----- workflows (compare by title) -----
+    let wf_changes = diff_by_key(
+        &prev.workflows,
+        &curr.workflows,
+        |w| w.title.clone(),
+        |old, new| {
+            if old.body.trim() != new.body.trim() {
+                Some("  - body differs".to_string())
+            } else {
+                None
+            }
+        },
+    );
+    if !wf_changes.is_empty() {
+        any_changes = true;
+        out.push_str("## workflows\n\n");
+        out.push_str(&wf_changes);
+        out.push('\n');
+    }
+
+    // ----- topics (compare by name) -----
+    let topic_changes = diff_by_key(
+        &prev.topics,
+        &curr.topics,
+        |t| t.name.clone(),
+        |old, new| {
+            if old.title != new.title || old.body.trim() != new.body.trim() {
+                Some("  - title or body differs".to_string())
+            } else {
+                None
+            }
+        },
+    );
+    if !topic_changes.is_empty() {
+        any_changes = true;
+        out.push_str("## topics\n\n");
+        out.push_str(&topic_changes);
+        out.push('\n');
+    }
+
+    // ----- gotchas (set diff) -----
+    let prev_gotchas: std::collections::BTreeSet<&str> =
+        prev.gotchas.iter().map(String::as_str).collect();
+    let curr_gotchas: std::collections::BTreeSet<&str> =
+        curr.gotchas.iter().map(String::as_str).collect();
+    let added: Vec<&&str> = curr_gotchas.difference(&prev_gotchas).collect();
+    let removed: Vec<&&str> = prev_gotchas.difference(&curr_gotchas).collect();
+    if !added.is_empty() || !removed.is_empty() {
+        any_changes = true;
+        out.push_str("## gotchas\n\n");
+        for a in &added {
+            let _ = writeln!(out, "- ADDED: {a}");
+        }
+        for r in &removed {
+            let _ = writeln!(out, "- REMOVED: {r}");
+        }
+        out.push('\n');
+    }
+
+    if !any_changes {
+        out.push_str("*(no differences — backup and current are identical)*\n");
+    }
+    out
+}
+
+fn diff_meta(prev: &ManifestMeta, curr: &ManifestMeta) -> String {
+    let mut out = String::new();
+    for (field, p, c) in [
+        ("category", &prev.category, &curr.category),
+        ("summary", &prev.summary, &curr.summary),
+        ("paired_cli", &prev.paired_cli, &curr.paired_cli),
+    ] {
+        if p != c {
+            let _ = writeln!(
+                out,
+                "- {field}: was `{}`, now `{}`",
+                p.as_deref().unwrap_or("(none)"),
+                c.as_deref().unwrap_or("(none)")
+            );
+        }
+    }
+    out
+}
+
+fn diff_by_key<T, F, G>(
+    prev: &[T],
+    curr: &[T],
+    key: F,
+    changed: G,
+) -> String
+where
+    F: Fn(&T) -> String,
+    G: Fn(&T, &T) -> Option<String>,
+{
+    let mut out = String::new();
+    let prev_map: BTreeMap<String, &T> = prev.iter().map(|t| (key(t), t)).collect();
+    let curr_map: BTreeMap<String, &T> = curr.iter().map(|t| (key(t), t)).collect();
+    for (k, c) in &curr_map {
+        match prev_map.get(k) {
+            None => {
+                let _ = writeln!(out, "- ADDED: `{k}`");
+            }
+            Some(p) => {
+                if let Some(detail) = changed(p, c) {
+                    let _ = writeln!(out, "- CHANGED: `{k}`\n{detail}");
+                }
+            }
+        }
+    }
+    for k in prev_map.keys() {
+        if !curr_map.contains_key(k) {
+            let _ = writeln!(out, "- REMOVED: `{k}`");
+        }
+    }
+    out
+}
