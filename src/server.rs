@@ -369,8 +369,17 @@ impl ServerHandler for LibrarianServer {
     }
 }
 
+/// Convert an anyhow error into a JSON-RPC ErrorData. We use `invalid_params`
+/// (code -32602) for nearly all our errors because:
+///   - Most are user/agent input failures (bad token, empty manifest, unknown
+///     server, etc.) — that's the semantically correct code.
+///   - Some MCP clients (Claude Desktop observed) display a generic
+///     "Tool execution failed" for `internal_error` (-32603) and suppress
+///     the message, but surface the message for `invalid_params`. Choosing
+///     the right code is the difference between actionable feedback and
+///     a dead-end error.
 fn internal(err: anyhow::Error) -> ErrorData {
-    ErrorData::internal_error(format!("{err:#}"), None)
+    ErrorData::invalid_params(format!("{err:#}"), None)
 }
 
 /// Load a server's manifest with one special case: if it's the librarian itself
