@@ -410,12 +410,15 @@ fn render_topic(
         );
     }
 
-    // Related notes for this topic
+    // Related notes for this topic. Filtering is always computed (we use
+    // `related.is_empty()` further down as a fallback condition), but we
+    // skip the section render when a virtual topic already enumerated the
+    // relevant notes — otherwise the same note appears in two sections.
     let related: Vec<&Note> = notes
         .iter()
         .filter(|n| n.topic.as_deref().is_some_and(|t| t.eq_ignore_ascii_case(topic)))
         .collect();
-    if !related.is_empty() {
+    if !related.is_empty() && virtual_kind.is_none() {
         out.push_str("## Related Notes\n\n");
         let (observed, inferred): (Vec<&Note>, Vec<&Note>) =
             related.iter().copied().partition(|n| n.basis == NoteBasis::Observed);
