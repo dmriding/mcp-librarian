@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -951,6 +952,48 @@ pub fn write_manifest(paths: &Paths, server: &str, manifest: &Manifest) -> Resul
     let s = toml::to_string_pretty(manifest)?;
     std::fs::write(&target, s).with_context(|| format!("writing {}", target.display()))?;
     Ok(())
+}
+
+/// Lookup mtimes of the current manifest and its backup. Either may be `None`
+/// if the corresponding file doesn't exist. Used by callers that render a
+/// diff or restore preview, so the user can see which side is the newer file
+/// on disk (and thus which direction a restore will move).
+pub fn manifest_mtimes(
+    paths: &Paths,
+    server: &str,
+) -> (Option<DateTime<Utc>>, Option<DateTime<Utc>>) {
+    (
+        mtime_of(&paths.manifest_path(server)),
+        mtime_of(&paths.manifest_backup_path(server)),
+    )
+}
+
+fn mtime_of(path: &Path) -> Option<DateTime<Utc>> {
+    let meta = std::fs::metadata(path).ok()?;
+    let st = meta.modified().ok()?;
+    Some(DateTime::<Utc>::from(st))
+}
+
+/// Format a pair of (current, backup) mtimes as labeled strings — appending
+/// `(older)` / `(newer)` so a reader can tell which file on disk is the more
+/// recent one without doing date math in their head. This is the load-bearing
+/// disambiguation for `librarian_manifest_diff` after a restore (where the
+/// backup is now the newer file and the diff direction inverts).
+pub fn format_mtime_pair(
+    current: Option<DateTime<Utc>>,
+    backup: Option<DateTime<Utc>>,
+) -> (String, String) {
+    let fmt = |t: Option<DateTime<Utc>>| {
+        t.map(|d| d.format("%Y-%m-%d %H:%M UTC").to_string())
+            .unwrap_or_else(|| "(unknown)".to_string())
+    };
+    let curr_s = fmt(current);
+    let bak_s = fmt(backup);
+    match (current, backup) {
+        (Some(c), Some(b)) if c > b => (format!("{curr_s} (newer)"), format!("{bak_s} (older)")),
+        (Some(c), Some(b)) if c < b => (format!("{curr_s} (older)"), format!("{bak_s} (newer)")),
+        _ => (curr_s, bak_s),
+    }
 }
 
 /// Read the backup manifest, if any. Returns `Ok(None)` if no `.bak` file exists.
