@@ -917,12 +917,28 @@ impl LibrarianServer {
                 p.server
             )),
             (Some(curr), Some(bak)) => {
+                let (curr_t, bak_t) = playbook::manifest_mtimes(&self.paths, &p.server);
+                let (curr_label, bak_label) = playbook::format_mtime_pair(curr_t, bak_t);
                 let mut out = String::new();
                 let _ = writeln!(out, "# Manifest diff for `{}`", p.server);
                 let _ = writeln!(
                     out,
-                    "\n**Backup → Current** (what `librarian_manifest_write` changed)\n"
+                    "\n**Backup → Current** (what `librarian_manifest_write` changed)"
                 );
+                let _ = writeln!(out, "- Backup:  {bak_label}");
+                let _ = writeln!(out, "- Current: {curr_label}");
+                // After a `librarian_manifest_restore` the backup is the file with
+                // the newer mtime — the diff direction is the same, but what looks
+                // like an "added" change is what restore would re-undo. Surface this
+                // explicitly so it can't be misread.
+                if matches!((curr_t, bak_t), (Some(c), Some(b)) if b > c) {
+                    out.push_str(
+                        "\n> *Note: backup is newer than current — looks like \
+                         a restore just happened. Items listed below are what a \
+                         second `librarian_manifest_restore` would re-introduce.*\n",
+                    );
+                }
+                out.push('\n');
                 out.push_str(&playbook::diff_manifests(&bak, &curr));
                 out.push_str(
                     "\n---\n*To revert these changes, use `librarian_manifest_restore`.*\n",
@@ -965,7 +981,14 @@ impl LibrarianServer {
                 );
                 match (&current, &backup) {
                     (Some(c), Some(b)) => {
+                        let (curr_t, bak_t) =
+                            playbook::manifest_mtimes(&self.paths, &p.server);
+                        let (curr_label, bak_label) =
+                            playbook::format_mtime_pair(curr_t, bak_t);
                         preview.push_str("### What will change (current → backup)\n\n");
+                        let _ = writeln!(preview, "- Current: {curr_label}");
+                        let _ = writeln!(preview, "- Backup:  {bak_label}");
+                        preview.push('\n');
                         preview.push_str(&playbook::diff_manifests(c, b));
                     }
                     (None, Some(_)) => {

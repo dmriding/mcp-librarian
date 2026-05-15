@@ -533,6 +533,57 @@ fn list_manifest_servers_lets_search_find_them() {
     assert!(loaded.workflows.iter().any(|w| w.title.contains("repo")));
 }
 
+// --- mtime label helper (diff direction disambiguation) ---
+
+#[test]
+fn format_mtime_pair_labels_newer_and_older() {
+    use chrono::TimeZone;
+    let a = Utc.with_ymd_and_hms(2026, 5, 15, 17, 42, 0).unwrap();
+    let b = Utc.with_ymd_and_hms(2026, 5, 15, 17, 45, 0).unwrap();
+
+    // Current newer than backup (normal post-write state)
+    let (curr, bak) = playbook::format_mtime_pair(Some(b), Some(a));
+    assert!(curr.contains("(newer)"), "current is newer; got: {curr}");
+    assert!(bak.contains("(older)"), "backup is older; got: {bak}");
+
+    // Backup newer than current (post-restore state)
+    let (curr, bak) = playbook::format_mtime_pair(Some(a), Some(b));
+    assert!(curr.contains("(older)"), "current is older; got: {curr}");
+    assert!(bak.contains("(newer)"), "backup is newer; got: {bak}");
+}
+
+#[test]
+fn format_mtime_pair_handles_missing_files() {
+    let (curr, bak) = playbook::format_mtime_pair(None, None);
+    assert_eq!(curr, "(unknown)");
+    assert_eq!(bak, "(unknown)");
+}
+
+#[test]
+fn manifest_mtimes_reflects_disk_state() {
+    let (_tmp, paths) = temp_paths();
+    // Neither file exists yet
+    let (c, b) = playbook::manifest_mtimes(&paths, "foo");
+    assert!(c.is_none() && b.is_none());
+
+    // Write the manifest; only current should have an mtime
+    let m = Manifest {
+        meta: ManifestMeta {
+            summary: Some("x".into()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    playbook::write_manifest(&paths, "foo", &m).unwrap();
+    let (c, b) = playbook::manifest_mtimes(&paths, "foo");
+    assert!(c.is_some() && b.is_none());
+
+    // Write a second time; now both exist (backup gets created on overwrite)
+    playbook::write_manifest(&paths, "foo", &m).unwrap();
+    let (c, b) = playbook::manifest_mtimes(&paths, "foo");
+    assert!(c.is_some() && b.is_some());
+}
+
 // --- librarian self-topics ---
 
 #[test]
