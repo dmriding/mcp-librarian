@@ -452,6 +452,56 @@ fn malformed_toml_returns_parse_error() {
     );
 }
 
+// --- note enum strictness (Fix 4) ---
+//
+// Claude Desktop reported that passing `null` for `kind` and `basis` on
+// librarian_note appeared to succeed with auto-defaulted (ErrorPattern,
+// Observed). My code has no auto-inference. These tests verify that serde
+// rejects bad enum inputs at the deserialization layer — meaning any silent
+// defaulting Claude Desktop saw was happening UPSTREAM in its own MCP
+// client, not in the librarian. If these tests fail, we have a serde
+// permissiveness bug to fix.
+
+#[test]
+fn note_params_rejects_null_kind() {
+    let json = r#"{"server":"x","kind":null,"basis":"observed","claim":"y"}"#;
+    let result: Result<mcp_librarian::server::NoteParams, _> =
+        serde_json::from_str(json);
+    assert!(result.is_err(), "null kind should be rejected; got {:?}", result.ok().map(|p| p.kind));
+}
+
+#[test]
+fn note_params_rejects_missing_kind() {
+    let json = r#"{"server":"x","basis":"observed","claim":"y"}"#;
+    let result: Result<mcp_librarian::server::NoteParams, _> =
+        serde_json::from_str(json);
+    assert!(result.is_err(), "missing kind should be rejected");
+}
+
+#[test]
+fn note_params_rejects_invalid_kind_variant() {
+    let json = r#"{"server":"x","kind":"not_a_real_kind","basis":"observed","claim":"y"}"#;
+    let result: Result<mcp_librarian::server::NoteParams, _> =
+        serde_json::from_str(json);
+    assert!(result.is_err(), "unknown kind variant should be rejected");
+}
+
+#[test]
+fn note_params_rejects_null_basis() {
+    let json = r#"{"server":"x","kind":"tip","basis":null,"claim":"y"}"#;
+    let result: Result<mcp_librarian::server::NoteParams, _> =
+        serde_json::from_str(json);
+    assert!(result.is_err(), "null basis should be rejected");
+}
+
+#[test]
+fn note_params_accepts_valid_input() {
+    let json = r#"{"server":"x","kind":"workflow","basis":"observed","claim":"y"}"#;
+    let result: Result<mcp_librarian::server::NoteParams, _> =
+        serde_json::from_str(json);
+    assert!(result.is_ok(), "valid input should parse: {:?}", result.err());
+}
+
 // --- search surfaces manifest-only servers (Fix 3) ---
 
 #[test]
