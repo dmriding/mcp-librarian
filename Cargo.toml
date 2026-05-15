@@ -1,0 +1,59 @@
+[package]
+name = "mcp-librarian"
+version = "0.1.0"
+edition = "2024"
+description = "An MCP server that indexes your other MCP servers and emits playbooks on demand."
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/dmriding/mcp-librarian"
+
+[[bin]]
+name = "mcp-librarian"
+path = "src/main.rs"
+
+[[example]]
+name = "mock_server"
+path = "examples/mock_server.rs"
+
+[dependencies]
+rmcp = { version = "0.8", features = [
+    "server",
+    "client",
+    "transport-child-process",
+    "transport-io",
+    "schemars",
+    "macros",
+] }
+tokio = { version = "1", features = [
+    "macros",
+    "rt-multi-thread",
+    "fs",
+    "process",
+    "io-util",
+    "io-std",
+    "time",
+    "sync",
+    "signal",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = { version = "1", features = ["chrono04"] }
+toml = "0.8"
+clap = { version = "4", features = ["derive"] }
+directories = "5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+futures = "0.3"
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "gzip",
+    "http2",
+    "charset",
+] }
+html2text = "0.12"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
