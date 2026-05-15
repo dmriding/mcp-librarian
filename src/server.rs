@@ -474,6 +474,8 @@ impl LibrarianServer {
         let q_tokens: Vec<&str> = q.split_whitespace().collect();
 
         let mut hits: Vec<(String, String, String, i64)> = Vec::new();
+
+        // Pass 1: indexed servers — rank their probed tools by name + description.
         for entry in index.servers.values() {
             for tool in &entry.tools {
                 let score = rank(&q, &q_tokens, &tool.name, &tool.description);
@@ -487,6 +489,32 @@ impl LibrarianServer {
                 }
             }
         }
+
+        // Pass 2: manifest-only servers — rank against manifest content so
+        // pre-authored playbooks are findable even before the server is installed.
+        for server in playbook::list_manifest_servers(&self.paths).unwrap_or_default() {
+            if index.servers.contains_key(&server) {
+                continue;
+            }
+            let manifest = match playbook::load_manifest(&self.paths, &server) {
+                Ok(Some(m)) => m,
+                _ => continue,
+            };
+            let haystack = manifest_haystack(&manifest);
+            let score = rank(&q, &q_tokens, &server, &haystack);
+            if score > 0 {
+                let desc = format!(
+                    "[NOT INSTALLED] {}",
+                    manifest
+                        .meta
+                        .summary
+                        .clone()
+                        .unwrap_or_else(|| "manifest authored before install".to_string())
+                );
+                hits.push((server, "(overview)".to_string(), desc, score));
+            }
+        }
+
         hits.sort_by(|a, b| b.3.cmp(&a.3));
         hits.truncate(limit);
         Ok(playbook::render_search(&p.query, &hits))
@@ -992,6 +1020,44 @@ impl LibrarianServer {
 }
 
 // =================== Fuzzy rank ===================
+
+/// Concatenate searchable fields from a manifest for free-text matching.
+fn manifest_haystack(m: &Manifest) -> String {
+    let mut s = String::new();
+    if let Some(c) = &m.meta.category {
+        s.push_str(c);
+        s.push(' ');
+    }
+    if let Some(sum) = &m.meta.summary {
+        s.push_str(sum);
+        s.push(' ');
+    }
+    for c in &m.tool_categories {
+        s.push_str(&c.name);
+        s.push(' ');
+        for t in &c.tools {
+            s.push_str(t);
+            s.push(' ');
+        }
+    }
+    for w in &m.workflows {
+        s.push_str(&w.title);
+        s.push(' ');
+        s.push_str(&w.body);
+        s.push(' ');
+    }
+    for t in &m.topics {
+        s.push_str(&t.title);
+        s.push(' ');
+        s.push_str(&t.body);
+        s.push(' ');
+    }
+    for g in &m.gotchas {
+        s.push_str(g);
+        s.push(' ');
+    }
+    s
+}
 
 fn rank(query: &str, query_tokens: &[&str], name: &str, description: &str) -> i64 {
     let name_lower = name.to_lowercase();
