@@ -585,6 +585,40 @@ fn virtual_topic_categories_renders_tool_groupings() {
 }
 
 #[test]
+fn virtual_topic_does_not_duplicate_notes_in_related_section() {
+    // A note with kind=Tip + basis=Observed AND topic="gotchas" should appear
+    // ONCE in the virtual gotchas section (under "Learned gotchas"), not also
+    // in a separate "Related Notes" section.
+    use chrono::Utc;
+    let entry = fake_entry("foo", vec![]);
+    let manifest = Manifest::default();
+    let note = Note {
+        timestamp: Utc::now(),
+        session_id: None,
+        server: "foo".into(),
+        tool: Some("bar".into()),
+        topic: Some("gotchas".into()),
+        kind: NoteKind::Tip,
+        basis: NoteBasis::Observed,
+        claim: "X is rate-limited at 1/sec".into(),
+        tags: vec![],
+        possibly_stale: false,
+    };
+    let out = playbook::render_help(&entry, Some(&manifest), &[note], Some("gotchas"));
+    // Should appear exactly once — count occurrences of the claim text
+    let occurrences = out.matches("X is rate-limited at 1/sec").count();
+    assert_eq!(
+        occurrences, 1,
+        "expected note to render exactly once in virtual gotchas topic, got {occurrences}:\n{out}"
+    );
+    // Specifically: the Related Notes section should not appear at all
+    assert!(
+        !out.contains("## Related Notes"),
+        "virtual topic should suppress the separate Related Notes section"
+    );
+}
+
+#[test]
 fn user_defined_topic_wins_over_virtual_name() {
     // If the manifest defines a topic literally named "gotchas", we render
     // THAT, not the virtual section.
