@@ -276,13 +276,25 @@ fn render_overview(entry: &ServerEntry, manifest: Option<&Manifest>, notes: &[No
         out.push('\n');
     }
 
-    // Tool categories
+    // Tool categories: prefer probed tools if we have them; otherwise fall
+    // back to manifest-declared categories so manifest-only servers
+    // (authored before install) still show their structure.
+    let has_manifest_categories = manifest.map(|m| !m.tool_categories.is_empty()).unwrap_or(false);
     if !entry.tools.is_empty() {
         out.push_str("## Tool Categories\n\n");
         let groups = group_tools(entry, manifest);
         for (cat, tools) in &groups {
             let names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
             let _ = writeln!(out, "- **{cat}**: {}", names.join(", "));
+        }
+        out.push('\n');
+    } else if has_manifest_categories
+        && let Some(m) = manifest
+    {
+        out.push_str("## Tool Categories\n\n");
+        out.push_str("*(from manifest — not yet probed against an installed server)*\n\n");
+        for cat in &m.tool_categories {
+            let _ = writeln!(out, "- **{}**: {}", cat.name, cat.tools.join(", "));
         }
         out.push('\n');
     }
