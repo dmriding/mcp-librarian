@@ -606,7 +606,10 @@ fn user_defined_topic_wins_over_virtual_name() {
 // --- manifest preview + fingerprint ---
 
 #[test]
-fn manifest_preview_enumerates_concrete_additions() {
+fn manifest_preview_summarizes_structure() {
+    // Preview is intentionally compact (counts + names, not full content) —
+    // the agent already has the proposed manifest in its own context, and
+    // verbose previews trip up some MCP clients on the post-call render.
     let manifest = Manifest {
         meta: ManifestMeta {
             category: Some("comms".into()),
@@ -626,7 +629,7 @@ fn manifest_preview_enumerates_concrete_additions() {
             title: "Rate limits".into(),
             body: "stuff".into(),
         }],
-        gotchas: vec!["X is gated at 1/sec".into()],
+        gotchas: vec!["X is gated at 1/sec".into(), "Y too".into()],
     };
     let target = std::path::PathBuf::from("/tmp/foo.toml");
     let out = playbook::render_manifest_preview("foo", &manifest, &target, None);
@@ -634,12 +637,14 @@ fn manifest_preview_enumerates_concrete_additions() {
     assert!(out.contains("CREATE"));
     assert!(out.contains("comms"));
     assert!(out.contains("Chat server."));
+    // Structural facts — names + counts, not full content
     assert!(out.contains("Read"));
-    // Every tool name is enumerated — no vague "3 tools" summary
-    assert!(out.contains("a, b, c"));
+    assert!(out.contains("3 tools"));
     assert!(out.contains("Threaded reply"));
     assert!(out.contains("rate_limits"));
-    assert!(out.contains("X is gated at 1/sec"));
+    assert!(out.contains("Gotchas: 2 entries"));
+    // Full gotcha text NOT in preview (full content is in the proposed manifest itself)
+    assert!(!out.contains("X is gated at 1/sec"));
 }
 
 #[test]

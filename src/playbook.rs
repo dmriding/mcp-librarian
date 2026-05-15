@@ -735,62 +735,64 @@ pub fn render_manifest_preview(
     target_path: &Path,
     existing: Option<&Manifest>,
 ) -> String {
+    // Deliberately tight. The agent already has the proposed manifest content
+    // in its own context; this preview is for STRUCTURAL confirmation, not
+    // verbatim re-rendering. Keeping it short also dodges client-side hangs
+    // observed in some MCP hosts when responses contain dense markdown with
+    // backticks/em-dashes (a Slack-sized full-content preview hung Claude
+    // Desktop on the post-call render).
     let mut out = String::new();
     out.push_str("## MANIFEST WRITE — PREVIEW (NOT YET COMMITTED)\n\n");
-    let _ = writeln!(out, "**Server:** `{server}`");
-    let _ = writeln!(out, "**Target file:** `{}`", target_path.display());
+    let _ = writeln!(out, "Server: {server}");
+    let _ = writeln!(out, "Target: {}", target_path.display());
     if existing.is_some() {
-        out.push_str("**Mode:** OVERWRITE (a manifest already exists for this server)\n\n");
+        out.push_str("Mode:   OVERWRITE (an existing manifest will be backed up to .toml.bak)\n\n");
     } else {
-        out.push_str("**Mode:** CREATE (no manifest exists for this server yet)\n\n");
+        out.push_str("Mode:   CREATE\n\n");
     }
 
-    out.push_str("### Meta\n\n");
+    out.push_str("Meta\n");
     let _ = writeln!(
         out,
-        "- `category`: {}",
-        manifest.meta.category.as_deref().unwrap_or("*(none)*")
+        "  category: {}",
+        manifest.meta.category.as_deref().unwrap_or("(none)")
     );
     let _ = writeln!(
         out,
-        "- `summary`: {}",
-        manifest.meta.summary.as_deref().unwrap_or("*(none)*")
+        "  summary:  {}",
+        manifest.meta.summary.as_deref().unwrap_or("(none)")
     );
     if let Some(cli) = &manifest.meta.paired_cli {
-        let _ = writeln!(out, "- `paired_cli`: {cli}");
+        let _ = writeln!(out, "  paired_cli: {cli}");
     }
     out.push('\n');
 
     if !manifest.tool_categories.is_empty() {
-        out.push_str("### Tool categories\n\n");
+        let _ = writeln!(out, "Tool categories ({}):", manifest.tool_categories.len());
         for c in &manifest.tool_categories {
-            let _ = writeln!(out, "- **{}** ({} tools): {}", c.name, c.tools.len(), c.tools.join(", "));
+            let _ = writeln!(out, "  - {} ({} tools)", c.name, c.tools.len());
         }
         out.push('\n');
     }
 
     if !manifest.workflows.is_empty() {
-        out.push_str("### Workflows\n\n");
+        let _ = writeln!(out, "Workflows ({}):", manifest.workflows.len());
         for w in &manifest.workflows {
-            let first_line = w.body.lines().next().unwrap_or("").trim();
-            let _ = writeln!(out, "- **{}** — first step: {}", w.title, first_line);
+            let _ = writeln!(out, "  - {}", w.title);
         }
         out.push('\n');
     }
 
     if !manifest.topics.is_empty() {
-        out.push_str("### Topics\n\n");
+        let _ = writeln!(out, "Topics ({}):", manifest.topics.len());
         for t in &manifest.topics {
-            let _ = writeln!(out, "- **{}** — {}", t.name, t.title);
+            let _ = writeln!(out, "  - {} ({})", t.name, t.title);
         }
         out.push('\n');
     }
 
     if !manifest.gotchas.is_empty() {
-        out.push_str("### Gotchas\n\n");
-        for g in &manifest.gotchas {
-            let _ = writeln!(out, "- {g}");
-        }
+        let _ = writeln!(out, "Gotchas: {} entries", manifest.gotchas.len());
         out.push('\n');
     }
 
