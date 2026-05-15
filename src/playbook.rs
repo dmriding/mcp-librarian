@@ -362,14 +362,36 @@ fn render_topic(
     let manifest_topic = manifest
         .and_then(|m| m.topics.iter().find(|t| t.name.eq_ignore_ascii_case(topic)));
 
-    let title = manifest_topic
-        .map(|t| t.title.clone())
-        .unwrap_or_else(|| topic.to_string());
+    // Virtual topic names map to the manifest's structural sections.
+    // User-defined manifest topics with the same name always win.
+    let virtual_kind: Option<VirtualTopic> = if manifest_topic.is_none() {
+        match topic.to_lowercase().as_str() {
+            "gotchas" => Some(VirtualTopic::Gotchas),
+            "workflows" => Some(VirtualTopic::Workflows),
+            "categories" | "tool_categories" => Some(VirtualTopic::Categories),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    let title = if let Some(t) = manifest_topic {
+        t.title.clone()
+    } else {
+        match virtual_kind {
+            Some(VirtualTopic::Gotchas) => "Gotchas".to_string(),
+            Some(VirtualTopic::Workflows) => "Workflows".to_string(),
+            Some(VirtualTopic::Categories) => "Tool categories".to_string(),
+            None => topic.to_string(),
+        }
+    };
     let _ = writeln!(out, "# {} — {}", entry.name, title);
     out.push('\n');
 
     if let Some(t) = manifest_topic {
         let _ = writeln!(out, "{}\n", t.body.trim_end());
+    } else if let Some(v) = virtual_kind {
+        render_virtual_topic(&mut out, entry, manifest, notes, v);
     } else {
         out.push_str(
             "> *No manifest topic by that name. Showing related learned notes only.*\n\n",
@@ -454,6 +476,112 @@ fn render_tool_detail(out: &mut String, tool: &IndexedTool) {
             let _ = writeln!(out, "{k}: {v}");
         }
         out.push_str("```\n\n");
+    }
+}
+
+// =================== Virtual topics ===================
+
+#[derive(Debug, Clone, Copy)]
+enum VirtualTopic {
+    Gotchas,
+    Workflows,
+    Categories,
+}
+
+fn render_virtual_topic(
+    out: &mut String,
+    entry: &ServerEntry,
+    manifest: Option<&Manifest>,
+    notes: &[Note],
+    kind: VirtualTopic,
+) {
+    match kind {
+        VirtualTopic::Gotchas => {
+            // Manifest gotchas
+            if let Some(m) = manifest
+                && !m.gotchas.is_empty()
+            {
+                for g in &m.gotchas {
+                    let _ = writeln!(out, "- {g}");
+                }
+                out.push('\n');
+            }
+            // Plus observed behavior/error_pattern/tip notes
+            let relevant: Vec<&Note> = notes
+                .iter()
+                .filter(|n| {
+                    matches!(
+                        n.kind,
+                        NoteKind::Behavior | NoteKind::ErrorPattern | NoteKind::Tip
+                    ) && n.basis == NoteBasis::Observed
+                })
+                .collect();
+            if !relevant.is_empty() {
+                out.push_str("### Learned gotchas (observed)\n\n");
+                for n in &relevant {
+                    let stale = if n.possibly_stale { " ⚠" } else { "" };
+                    let _ = writeln!(
+                        out,
+                        "- *(learned {}{})* {}",
+                        n.timestamp.format("%Y-%m-%d"),
+                        stale,
+                        n.claim
+                    );
+                }
+                out.push('\n');
+            }
+            if manifest.map(|m| m.gotchas.is_empty()).unwrap_or(true) && relevant.is_empty() {
+                out.push_str("*(no gotchas filed yet)*\n");
+            }
+        }
+        VirtualTopic::Workflows => {
+            if let Some(m) = manifest
+                && !m.workflows.is_empty()
+            {
+                for wf in &m.workflows {
+                    let _ = writeln!(out, "### {}\n\n{}\n", wf.title, wf.body.trim_end());
+                }
+            }
+            // Plus observed workflow-kind notes
+            let workflow_notes: Vec<&Note> = notes
+                .iter()
+                .filter(|n| n.kind == NoteKind::Workflow && n.basis == NoteBasis::Observed)
+                .collect();
+            if !workflow_notes.is_empty() {
+                out.push_str("### Learned workflows (observed)\n\n");
+                for n in &workflow_notes {
+                    let stale = if n.possibly_stale { " ⚠" } else { "" };
+                    let _ = writeln!(
+                        out,
+                        "- *(learned {}{})* {}",
+                        n.timestamp.format("%Y-%m-%d"),
+                        stale,
+                        n.claim
+                    );
+                }
+                out.push('\n');
+            }
+            if manifest.map(|m| m.workflows.is_empty()).unwrap_or(true)
+                && workflow_notes.is_empty()
+            {
+                out.push_str("*(no workflows filed yet)*\n");
+            }
+        }
+        VirtualTopic::Categories => {
+            if entry.tools.is_empty() {
+                out.push_str(
+                    "*(no tools indexed for this server — run `librarian_refresh` if installed, \
+                     or rely on the manifest's `tool_categories` definitions)*\n",
+                );
+            } else {
+                let groups = group_tools(entry, manifest);
+                for (cat, tools) in &groups {
+                    let names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
+                    let _ = writeln!(out, "- **{cat}**: {}", names.join(", "));
+                }
+                out.push('\n');
+            }
+        }
     }
 }
 

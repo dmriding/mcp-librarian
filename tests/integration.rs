@@ -452,6 +452,76 @@ fn malformed_toml_returns_parse_error() {
     );
 }
 
+// --- virtual topics (Fix 2) ---
+
+#[test]
+fn virtual_topic_gotchas_renders_manifest_gotchas() {
+    let entry = fake_entry("foo", vec![]);
+    let manifest = Manifest {
+        gotchas: vec!["watch the rate limit".into(), "tokens expire fast".into()],
+        ..Default::default()
+    };
+    let out = playbook::render_help(&entry, Some(&manifest), &[], Some("gotchas"));
+    assert!(out.contains("foo — Gotchas"));
+    assert!(out.contains("watch the rate limit"));
+    assert!(out.contains("tokens expire fast"));
+    assert!(
+        !out.contains("No manifest topic by that name"),
+        "virtual topic should not trip the no-topic warning"
+    );
+}
+
+#[test]
+fn virtual_topic_workflows_renders_manifest_workflows() {
+    let entry = fake_entry("foo", vec![]);
+    let manifest = Manifest {
+        workflows: vec![ManifestWorkflow {
+            title: "Bootstrap".into(),
+            body: "1. init\n2. ack".into(),
+        }],
+        ..Default::default()
+    };
+    let out = playbook::render_help(&entry, Some(&manifest), &[], Some("workflows"));
+    assert!(out.contains("foo — Workflows"));
+    assert!(out.contains("Bootstrap"));
+    assert!(out.contains("1. init"));
+}
+
+#[test]
+fn virtual_topic_categories_renders_tool_groupings() {
+    let entry = fake_entry(
+        "foo",
+        vec![
+            ("query_a", "a", vec![]),
+            ("query_b", "b", vec![]),
+            ("write_x", "x", vec![]),
+        ],
+    );
+    let out = playbook::render_help(&entry, None, &[], Some("categories"));
+    assert!(out.contains("foo — Tool categories"));
+    // Auto-prefix grouping should bucket query_a/query_b together
+    assert!(out.contains("query"));
+}
+
+#[test]
+fn user_defined_topic_wins_over_virtual_name() {
+    // If the manifest defines a topic literally named "gotchas", we render
+    // THAT, not the virtual section.
+    let entry = fake_entry("foo", vec![]);
+    let manifest = Manifest {
+        gotchas: vec!["from-manifest-array".into()],
+        topics: vec![ManifestTopic {
+            name: "gotchas".into(),
+            title: "Custom Gotchas Section".into(),
+            body: "user-authored topic content".into(),
+        }],
+        ..Default::default()
+    };
+    let out = playbook::render_help(&entry, Some(&manifest), &[], Some("gotchas"));
+    assert!(out.contains("Custom Gotchas Section"));
+    assert!(out.contains("user-authored topic content"));
+}
+
 // --- manifest preview + fingerprint ---
 
 #[test]
