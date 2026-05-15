@@ -534,9 +534,19 @@ impl LibrarianServer {
             possibly_stale: false,
         };
         index::append_note(&self.paths, &note)?;
+        // Echo a preview of what was stored so the agent can verify the
+        // recorded value matches its intent — guards against silent
+        // misrecording (e.g. unexpected defaults at the client layer).
+        let claim_preview: String = if note.claim.chars().count() > 80 {
+            let mut s: String = note.claim.chars().take(80).collect();
+            s.push('…');
+            s
+        } else {
+            note.claim.clone()
+        };
         Ok(format!(
-            "noted ({:?}, {:?}) on `{}`",
-            note.kind, note.basis, p.server
+            "noted ({:?}, {:?}) on `{}`\n→ {}",
+            note.kind, note.basis, p.server, claim_preview
         ))
     }
 
