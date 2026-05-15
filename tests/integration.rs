@@ -384,6 +384,74 @@ fn index_save_load_round_trip() {
 
 // --- seed playbook → render ---
 
+// --- TOML manifest input path (Fix 1) ---
+
+#[test]
+fn toml_manifest_parses_to_expected_structure() {
+    // Note: in TOML, root-level fields (like `gotchas`) must come BEFORE any
+    // subtable header — otherwise they get attached to the previous table.
+    // This is a real footgun agents will hit; the parse error from
+    // `librarian_manifest_write` should help them recover.
+    let toml_str = r#"
+gotchas = ["watch out"]
+
+[meta]
+category = "comms"
+summary = "x"
+
+[[tool_categories]]
+name = "A"
+tools = ["t1"]
+
+[[workflows]]
+title = "W"
+body = "step"
+"#;
+    let parsed: Manifest = toml::from_str(toml_str).unwrap();
+    assert_eq!(parsed.meta.category.as_deref(), Some("comms"));
+    assert_eq!(parsed.meta.summary.as_deref(), Some("x"));
+    assert_eq!(parsed.tool_categories.len(), 1);
+    assert_eq!(parsed.tool_categories[0].name, "A");
+    assert_eq!(parsed.tool_categories[0].tools, vec!["t1".to_string()]);
+    assert_eq!(parsed.workflows.len(), 1);
+    assert_eq!(parsed.workflows[0].title, "W");
+    assert_eq!(parsed.workflows[0].body, "step");
+    assert_eq!(parsed.gotchas, vec!["watch out".to_string()]);
+    assert!(!playbook::manifest_is_empty(&parsed));
+}
+
+#[test]
+fn toml_multiline_body_preserves_newlines() {
+    // The whole point of TOML: triple-quoted blocks let agents emit multi-line
+    // workflow bodies without JSON escape mania. Confirms the leading newline
+    // after `"""` is trimmed and the content lands as written.
+    let toml_str = r#"
+[meta]
+summary = "x"
+
+[[workflows]]
+title = "W"
+body = """
+1. step
+2. step"""
+"#;
+    let parsed: Manifest = toml::from_str(toml_str).unwrap();
+    assert_eq!(parsed.workflows[0].body, "1. step\n2. step");
+}
+
+#[test]
+fn malformed_toml_returns_parse_error() {
+    let bad = "[meta\ninvalid syntax bro";
+    let result: Result<Manifest, _> = toml::from_str(bad);
+    assert!(result.is_err(), "expected parse failure on malformed TOML");
+    let msg = format!("{}", result.unwrap_err());
+    // toml error messages include position info — verify roughly
+    assert!(
+        msg.contains("expected") || msg.contains("invalid") || msg.contains("line"),
+        "expected line-numbered error, got: {msg}"
+    );
+}
+
 // --- manifest preview + fingerprint ---
 
 #[test]

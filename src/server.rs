@@ -170,8 +170,17 @@ pub struct RefreshParams {
 pub struct ManifestWriteParams {
     /// Server name the manifest applies to (must match the name in your MCP config).
     pub server: String,
-    /// The full manifest content to write. See `Manifest` schema for shape.
-    pub manifest: Manifest,
+    /// **PREFERRED for non-trivial content.** The manifest as a single TOML string.
+    /// Easier to produce than nested JSON — triple-quoted blocks (`\"\"\"...\"\"\"`)
+    /// handle multi-line workflow/topic bodies cleanly, no escape-mania. Parsed via
+    /// toml::from_str. Provide ONE of `manifest_toml` or `manifest` (not both).
+    #[serde(default)]
+    pub manifest_toml: Option<String>,
+    /// Alternative: the manifest as a structured object. Use this only for short/simple
+    /// content. For anything with multi-line bodies, prefer `manifest_toml` — many MCP
+    /// clients hang or truncate when constructing deeply nested JSON with embedded newlines.
+    #[serde(default)]
+    pub manifest: Option<Manifest>,
     /// Required ONLY on the commit call. Get it from a prior propose call.
     /// Omit (or null) to perform a propose call — returns a preview + token.
     #[serde(default)]
@@ -272,6 +281,9 @@ impl LibrarianServer {
     #[tool(
         name = "librarian_manifest_write",
         description = "Write or replace a server's manifest (the authoritative curated playbook). \
+                       PASS THE MANIFEST AS `manifest_toml` (a single TOML string) — NOT as nested JSON. \
+                       Nested JSON with multi-line workflow/topic bodies causes many MCP clients to hang. \
+                       TOML uses `\"\"\"...\"\"\"` for multi-line strings, no escape mania. \
                        TWO-STEP REQUIRED: \
                        (1) Call WITHOUT confirm_token to receive a structured preview + a confirm_token. \
                        (2) Show the preview to the user verbatim and ask them to type 'I agree' or 'yes'. \
@@ -619,10 +631,39 @@ impl LibrarianServer {
 
 impl LibrarianServer {
     fn manifest_write_inner(&self, p: ManifestWriteParams) -> Result<String> {
+        // Guard 0: exactly one input form must be provided. Parse TOML if given;
+        // otherwise use the structured value. TOML is preferred because nested JSON
+        // with embedded newlines causes some MCP clients to hang during serialization.
+        let manifest: Manifest = match (p.manifest_toml.as_deref(), p.manifest) {
+            (Some(_), Some(_)) => anyhow::bail!(
+                "Error: provide either `manifest_toml` (preferred) or `manifest`, not both. \
+                 Action: pick one. `manifest_toml` accepts a single TOML string and is the \
+                 recommended path for non-trivial content."
+            ),
+            (Some(toml_str), None) => toml::from_str::<Manifest>(toml_str).map_err(|e| {
+                anyhow::anyhow!(
+                    "Error: failed to parse `manifest_toml`: {e}. \
+                     Action: TOML errors include line/col — fix the syntax and retry. \
+                     Common pitfalls: \
+                     (1) Root-level fields like `gotchas = [...]` MUST appear BEFORE any `[section]` or `[[section]]` header. \
+                         Otherwise they get attached to the previous table. \
+                     (2) Use `\"\"\"...\"\"\"` triple-quoted blocks for multi-line workflow/topic bodies — \
+                         no escape mania, raw newlines OK. \
+                     (3) `[[workflows]]`, `[[topics]]`, `[[tool_categories]]` use DOUBLE brackets (array-of-tables). \
+                     (4) `gotchas` is a string array: `gotchas = [\"item 1\", \"item 2\"]`."
+                )
+            })?,
+            (None, Some(m)) => m,
+            (None, None) => anyhow::bail!(
+                "Error: must provide either `manifest_toml` (preferred) or `manifest`. \
+                 Action: pass `manifest_toml` with a TOML string."
+            ),
+        };
+
         // Guard 1: refuse empty manifests outright. This is the cheapest gate
         // against an agent calling with `Manifest::default()` and blowing away
         // a curated file.
-        if playbook::manifest_is_empty(&p.manifest) {
+        if playbook::manifest_is_empty(&manifest) {
             anyhow::bail!(
                 "Error: manifest is empty (no meta, no categories, no workflows, no topics, no gotchas). \
                  Action: include at least one of `meta.category`, `meta.summary`, `tool_categories`, \
@@ -652,7 +693,7 @@ impl LibrarianServer {
                 let pending = PendingWrite {
                     server: p.server.clone(),
                     action: PendingAction::Write {
-                        fingerprint: playbook::manifest_fingerprint(&p.manifest),
+                        fingerprint: playbook::manifest_fingerprint(&manifest),
                         overwrite: p.overwrite,
                     },
                     expires_at: Utc::now() + chrono::Duration::seconds(PENDING_WRITE_TTL_SECS),
@@ -660,7 +701,7 @@ impl LibrarianServer {
                 let token = self.issue_token(pending);
                 let preview = playbook::render_manifest_preview(
                     &p.server,
-                    &p.manifest,
+                    &manifest,
                     &target,
                     existing.as_ref(),
                 );
@@ -714,7 +755,7 @@ impl LibrarianServer {
                         p.overwrite,
                     );
                 }
-                let now_fp = playbook::manifest_fingerprint(&p.manifest);
+                let now_fp = playbook::manifest_fingerprint(&manifest);
                 if &now_fp != token_fingerprint {
                     anyhow::bail!(
                         "Error: manifest content differs from what was proposed and approved. \
@@ -737,19 +778,19 @@ impl LibrarianServer {
                         p.server,
                     );
                 }
-                playbook::write_manifest(&self.paths, &p.server, &p.manifest)?;
+                playbook::write_manifest(&self.paths, &p.server, &manifest)?;
                 Ok(format!(
                     "Committed manifest for `{}` → `{}` ({} categor{}, {} workflow{}, {} topic{}, {} gotcha{}).",
                     p.server,
                     target.display(),
-                    p.manifest.tool_categories.len(),
-                    if p.manifest.tool_categories.len() == 1 { "y" } else { "ies" },
-                    p.manifest.workflows.len(),
-                    if p.manifest.workflows.len() == 1 { "" } else { "s" },
-                    p.manifest.topics.len(),
-                    if p.manifest.topics.len() == 1 { "" } else { "s" },
-                    p.manifest.gotchas.len(),
-                    if p.manifest.gotchas.len() == 1 { "" } else { "s" },
+                    manifest.tool_categories.len(),
+                    if manifest.tool_categories.len() == 1 { "y" } else { "ies" },
+                    manifest.workflows.len(),
+                    if manifest.workflows.len() == 1 { "" } else { "s" },
+                    manifest.topics.len(),
+                    if manifest.topics.len() == 1 { "" } else { "s" },
+                    manifest.gotchas.len(),
+                    if manifest.gotchas.len() == 1 { "" } else { "s" },
                 ))
             }
         }
