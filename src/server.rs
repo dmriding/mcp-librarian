@@ -1040,6 +1040,30 @@ impl LibrarianServer {
 
 // =================== Fuzzy rank ===================
 
+/// Natural-language stop words that produce noise in tool-search ranking
+/// (they appear inside unrelated tool names/descriptions and dominate the
+/// score for queries like "files in a repo"). The list is intentionally
+/// short — only the highest-noise triggers — to avoid over-filtering
+/// technical queries.
+const STOP_WORDS: &[&str] = &[
+    "a", "an", "the",
+    "in", "of", "on", "at", "to", "for", "with", "by", "from",
+    "and", "or", "but",
+    "is", "are", "was", "were", "be", "been",
+    "this", "that", "these", "those", "it", "its",
+    "show", "find", "get", "want", "need", "me", "my", "you", "your",
+    "which", "what", "when", "where", "who", "why", "how",
+    "can", "could", "should", "would", "will",
+];
+
+fn is_meaningful_token(t: &str) -> bool {
+    // Filter: must be ≥3 chars (eliminates "a", "an", "in", "of", "to", "or"
+    // mid-word matches) AND not in the stop-word list. Short technical terms
+    // like "ci" or "pr" do get filtered — acceptable; users searching for
+    // those will typically include more context.
+    t.len() >= 3 && !STOP_WORDS.iter().any(|s| s.eq_ignore_ascii_case(t))
+}
+
 /// Concatenate searchable fields from a manifest for free-text matching.
 fn manifest_haystack(m: &Manifest) -> String {
     let mut s = String::new();
@@ -1089,9 +1113,11 @@ fn rank(query: &str, query_tokens: &[&str], name: &str, description: &str) -> i6
     if desc_lower.contains(query) {
         score += 30;
     }
-    // Token overlap
+    // Token overlap — only meaningful tokens contribute to avoid false
+    // positives from short common words ("in", "a") substring-matching
+    // unrelated tool names.
     for token in query_tokens {
-        if token.is_empty() {
+        if !is_meaningful_token(token) {
             continue;
         }
         if name_lower.contains(token) {
@@ -1116,3 +1142,49 @@ const _BRIEF_BUDGET: usize = DEFAULT_BRIEF_TOKEN_BUDGET;
 // Touch RequestContext so future hooks (session id, etc.) don't break the import.
 #[allow(dead_code)]
 fn _ctx_marker(_c: RequestContext<RoleServer>) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stop_words_and_short_tokens_filtered() {
+        assert!(!is_meaningful_token("a"));
+        assert!(!is_meaningful_token("an"));
+        assert!(!is_meaningful_token("in"));
+        assert!(!is_meaningful_token("the"));
+        assert!(!is_meaningful_token("for"));
+        assert!(!is_meaningful_token("which"));
+        assert!(is_meaningful_token("files"));
+        assert!(is_meaningful_token("repo"));
+        assert!(is_meaningful_token("ingest"));
+    }
+
+    #[test]
+    fn rank_ignores_stop_words_in_query() {
+        // "files in a repo" should NOT score against a name/desc that only
+        // contains "in" or "a" — those tokens get filtered.
+        let q = "files in a repo";
+        let tokens: Vec<&str> = q.split_whitespace().collect();
+        // "forge_sprint_status" doesn't contain "files" or "repo" — should score 0
+        let score = rank(q, &tokens, "forge_sprint_status", "Check sprint state");
+        assert_eq!(
+            score, 0,
+            "stop-word and short-token matches must not contribute to score"
+        );
+    }
+
+    #[test]
+    fn rank_credits_meaningful_token_matches() {
+        let q = "files in a repo";
+        let tokens: Vec<&str> = q.split_whitespace().collect();
+        // A description that literally mentions "files" and "repo" should score.
+        let score = rank(
+            q,
+            &tokens,
+            "github_search",
+            "Search files across the repo",
+        );
+        assert!(score > 0, "meaningful tokens should still score");
+    }
+}
