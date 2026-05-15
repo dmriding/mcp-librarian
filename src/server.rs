@@ -361,27 +361,59 @@ fn internal(err: anyhow::Error) -> ErrorData {
     ErrorData::internal_error(format!("{err:#}"), None)
 }
 
+/// Load a server's manifest with one special case: if it's the librarian itself
+/// and no user-authored manifest exists, inject a synthetic default so the
+/// librarian doesn't appear orphaned in its own list output.
+fn manifest_for(paths: &Paths, server: &str) -> Option<Manifest> {
+    let user_manifest = playbook::load_manifest(paths, server).ok().flatten();
+    if user_manifest.is_some() {
+        return user_manifest;
+    }
+    if server.eq_ignore_ascii_case("librarian") {
+        return Some(playbook::synthetic_librarian_manifest());
+    }
+    None
+}
+
 // =================== Implementation bodies ===================
 
 impl LibrarianServer {
     fn list_inner(&self, p: ListParams) -> Result<String> {
         let index = Index::load(&self.paths.cache_file)?;
         let mut pairs: Vec<(ServerEntry, Option<Manifest>)> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        // 1. Indexed (probed/seeded) servers.
         for entry in index.servers.values() {
-            let manifest = playbook::load_manifest(&self.paths, &entry.name).ok().flatten();
+            let manifest = manifest_for(&self.paths, &entry.name);
+            seen.insert(entry.name.clone());
             pairs.push((entry.clone(), manifest));
         }
-        // If the index is empty, also surface discovery results so the agent
-        // at least sees what's *configured* even before a refresh.
+
+        // 2. If the index is empty, fall back to discovery so the agent at
+        //    least sees what's *configured* even before a refresh.
         if pairs.is_empty()
             && let Ok(configs) = discovery::discover()
         {
             for cfg in configs {
                 let entry = index::entry_from_unprobed(&cfg);
-                let manifest = playbook::load_manifest(&self.paths, &entry.name).ok().flatten();
+                let manifest = manifest_for(&self.paths, &entry.name);
+                seen.insert(entry.name.clone());
                 pairs.push((entry, manifest));
             }
         }
+
+        // 3. Surface manifest-only servers — manifests authored before the
+        //    corresponding server is installed. Without this they're invisible.
+        for server in playbook::list_manifest_servers(&self.paths).unwrap_or_default() {
+            if seen.contains(&server) {
+                continue;
+            }
+            let entry = index::entry_manifest_only(&server);
+            let manifest = playbook::load_manifest(&self.paths, &server).ok().flatten();
+            pairs.push((entry, manifest));
+        }
+
         Ok(playbook::render_list(&pairs, p.category.as_deref()))
     }
 
@@ -400,6 +432,11 @@ impl LibrarianServer {
                     .find(|c| c.name == p.server)
                 {
                     index::entry_from_unprobed(&cfg)
+                } else if playbook::load_manifest(&self.paths, &p.server)?.is_some() {
+                    // Last fallback: a manifest exists for this server even though it's
+                    // not currently installed/indexed. Synthesize a stub so the playbook
+                    // is reachable. This is the "authored in advance" path.
+                    index::entry_manifest_only(&p.server)
                 } else {
                     anyhow::bail!(
                         "unknown server '{}' — call `librarian_list()` to see what's available",
