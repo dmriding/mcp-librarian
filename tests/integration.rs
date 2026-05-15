@@ -533,6 +533,47 @@ fn list_manifest_servers_lets_search_find_them() {
     assert!(loaded.workflows.iter().any(|w| w.title.contains("repo")));
 }
 
+// --- librarian self-topics ---
+
+#[test]
+fn librarian_manifest_schema_topic_renders() {
+    let out = playbook::render_librarian_topic("manifest_schema");
+    // Headers and key references
+    assert!(out.contains("manifest schema"), "should have title");
+    assert!(out.contains("TOML grammar trap"), "should warn about root-before-section");
+    // All four sections covered
+    assert!(out.contains("[meta]"));
+    assert!(out.contains("[[tool_categories]]"));
+    assert!(out.contains("[[workflows]]"));
+    assert!(out.contains("[[topics]]"));
+    assert!(out.contains("gotchas"));
+    // Working example present
+    assert!(out.contains("Minimal working example"));
+    assert!(out.contains("foo_get"), "example should include concrete tool names");
+}
+
+#[test]
+fn librarian_topic_aliases_resolve() {
+    let canonical = playbook::render_librarian_topic("manifest_schema");
+    assert_eq!(playbook::render_librarian_topic("manifest"), canonical);
+    assert_eq!(playbook::render_librarian_topic("schema"), canonical);
+    assert_eq!(playbook::render_librarian_topic("Manifest-Schema"), canonical);
+}
+
+#[test]
+fn librarian_unknown_topic_returns_friendly_message() {
+    let out = playbook::render_librarian_topic("not-a-real-topic");
+    assert!(out.contains("no topic by that name"));
+    assert!(out.contains("manifest_schema"), "should list known topics");
+}
+
+#[test]
+fn librarian_render_self_advertises_topics() {
+    let s = playbook::render_self();
+    assert!(s.contains("Available Topics"));
+    assert!(s.contains("manifest_schema"));
+}
+
 // --- virtual topics (Fix 2) ---
 
 #[test]

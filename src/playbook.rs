@@ -716,6 +716,117 @@ pub fn render_self() -> String {
         "- **Drift flag**: after a refresh, notes whose underlying tool schema changed get \
          `⚠possibly stale` markers. They're not deleted — read them and decide.\n",
     );
+    s.push_str("\n## Available Topics\n\n");
+    s.push_str(
+        "- **manifest_schema** — full TOML schema reference for `librarian_manifest_write` \
+         (field names, nesting, the root-keys-before-sections trap, a minimal working example)\n",
+    );
+    s.push_str("\nCall `librarian_help(\"librarian\", topic)` to drill in.\n");
+    s
+}
+
+/// Render a topic page for the librarian itself. Currently the only topic is
+/// `manifest_schema` — the answer to "how do I structure the manifest_toml
+/// argument?" without trial-and-error.
+pub fn render_librarian_topic(topic: &str) -> String {
+    let normalized = topic.to_lowercase().replace('-', "_");
+    match normalized.as_str() {
+        "manifest_schema" | "manifest" | "schema" => render_manifest_schema_topic(),
+        _ => format!(
+            "# librarian — `{topic}`\n\n\
+             *(no topic by that name. Known topics: `manifest_schema`.)*\n"
+        ),
+    }
+}
+
+fn render_manifest_schema_topic() -> String {
+    // Hand-written TOML reference. Kept tight so it fits in agent context
+    // without truncation. The example at the bottom is intentionally minimal
+    // but complete — copy-pasting it produces a valid manifest.
+    let mut s = String::new();
+    s.push_str("# librarian — manifest schema\n\n");
+    s.push_str(
+        "Reference for the `manifest_toml` argument to `librarian_manifest_write`. \
+         Pass a single TOML string. Triple-quoted blocks (`\"\"\"...\"\"\"`) handle \
+         multi-line bodies without escape mania.\n\n",
+    );
+
+    s.push_str("## TOML grammar trap (read this first)\n\n");
+    s.push_str(
+        "Root-level keys MUST appear BEFORE any `[section]` or `[[section]]` header. \
+         Otherwise TOML attaches them to the previous table and parsing fails or \
+         silently produces a misshapen manifest.\n\n",
+    );
+    s.push_str("**Correct:**\n```toml\n");
+    s.push_str("gotchas = [\"item 1\", \"item 2\"]\n\n");
+    s.push_str("[meta]\ncategory = \"...\"\n");
+    s.push_str("```\n\n");
+    s.push_str("**Wrong** (gotchas becomes part of `[meta]`):\n```toml\n");
+    s.push_str("[meta]\ncategory = \"...\"\n\n");
+    s.push_str("gotchas = [\"item 1\"]\n");
+    s.push_str("```\n\n");
+
+    s.push_str("## Fields\n\n");
+    s.push_str("### Root\n");
+    s.push_str(
+        "- `gotchas` — array of strings. Single-line caveats and footguns. \
+         Surfaced under `## Important Gotchas` in `librarian_help(server)`.\n\n",
+    );
+
+    s.push_str("### `[meta]` (table)\n");
+    s.push_str("- `category` — string. Bucket name for `librarian_list` grouping (e.g. `\"comms\"`, `\"browser\"`).\n");
+    s.push_str("- `summary` — string. One-sentence description shown in `librarian_list`.\n");
+    s.push_str("- `paired_cli` — string, optional. Reserved for future CLI playbook generation.\n\n");
+
+    s.push_str("### `[[tool_categories]]` (array of tables — note DOUBLE brackets)\n");
+    s.push_str("- `name` — string. Category label shown in the overview.\n");
+    s.push_str("- `tools` — array of strings. Tool names that belong in this category.\n\n");
+
+    s.push_str("### `[[workflows]]` (array of tables)\n");
+    s.push_str("- `title` — string. Workflow name shown in the overview.\n");
+    s.push_str("- `body` — string (multi-line OK). Typically a numbered call sequence.\n\n");
+
+    s.push_str("### `[[topics]]` (array of tables)\n");
+    s.push_str("- `name` — string. Short slug used as the `topic` argument to `librarian_help(server, topic)`.\n");
+    s.push_str("- `title` — string. Human-readable title for the topic page.\n");
+    s.push_str("- `body` — string (multi-line OK). Markdown body.\n\n");
+
+    s.push_str("## Minimal working example\n\n");
+    s.push_str("```toml\n");
+    s.push_str("gotchas = [\n");
+    s.push_str("    \"Authentication requires an API key in the environment.\",\n");
+    s.push_str("    \"Rate limit is 60 requests/minute per key.\",\n");
+    s.push_str("]\n\n");
+    s.push_str("[meta]\n");
+    s.push_str("category = \"data\"\n");
+    s.push_str("summary  = \"One-line description of what the server does.\"\n\n");
+    s.push_str("[[tool_categories]]\n");
+    s.push_str("name  = \"Read\"\n");
+    s.push_str("tools = [\"foo_get\", \"foo_list\"]\n\n");
+    s.push_str("[[tool_categories]]\n");
+    s.push_str("name  = \"Write\"\n");
+    s.push_str("tools = [\"foo_create\", \"foo_update\"]\n\n");
+    s.push_str("[[workflows]]\n");
+    s.push_str("title = \"Read a record by id\"\n");
+    s.push_str("body  = \"\"\"\n");
+    s.push_str("1. `foo_list()` to see what's available\n");
+    s.push_str("2. `foo_get(id=...)` to load the full record\n");
+    s.push_str("\"\"\"\n\n");
+    s.push_str("[[topics]]\n");
+    s.push_str("name  = \"auth\"\n");
+    s.push_str("title = \"Authentication setup\"\n");
+    s.push_str("body  = \"\"\"\n");
+    s.push_str("Set `FOO_API_KEY` in the environment. The key needs `read:foo` scope.\n");
+    s.push_str("\"\"\"\n");
+    s.push_str("```\n\n");
+
+    s.push_str("## Validation\n\n");
+    s.push_str(
+        "`librarian_manifest_write` always runs in propose mode first (no `confirm_token`): \
+         that call validates the TOML and returns a structured preview. Use it as a \
+         dry-run — preview a candidate manifest, abandon the token, iterate. Tokens \
+         expire after 5 minutes; no commit happens without one.\n",
+    );
     s
 }
 

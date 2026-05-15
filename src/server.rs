@@ -447,7 +447,10 @@ impl LibrarianServer {
 
     fn help_inner(&self, p: HelpParams) -> Result<String> {
         if p.server.eq_ignore_ascii_case("librarian") {
-            return Ok(playbook::render_self());
+            return Ok(match p.topic.as_deref() {
+                None => playbook::render_self(),
+                Some(t) => playbook::render_librarian_topic(t),
+            });
         }
 
         let index = Index::load(&self.paths.cache_file)?;
