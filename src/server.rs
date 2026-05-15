@@ -130,6 +130,13 @@ pub struct NoteParams {
     pub claim: String,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Bypass duplicate detection. Default false. By default an exact match
+    /// on (server, tool, kind, normalized claim) is rejected with a pointer
+    /// to the existing note so playbooks don't accumulate near-duplicates.
+    /// Set true to file the note anyway (e.g. re-emphasizing a still-true
+    /// observation in a new session).
+    #[serde(default)]
+    pub allow_duplicate: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -530,6 +537,46 @@ impl LibrarianServer {
     }
 
     fn note_inner(&self, p: NoteParams) -> Result<String> {
+        // Dedup gate: by default reject a note that's equivalent to an existing
+        // one (same server, tool, kind, normalized claim). This is the cheapest
+        // way to keep playbooks from accumulating near-duplicates as fresh
+        // sessions re-discover known facts. `allow_duplicate=true` is the
+        // escape hatch for intentional re-emphasis.
+        if !p.allow_duplicate {
+            let existing = index::read_notes(&self.paths, &p.server).unwrap_or_default();
+            let new_norm = normalize_claim(&p.claim);
+            if let Some(dup) = existing.iter().find(|n| {
+                n.tool == p.tool
+                    && n.kind == p.kind
+                    && normalize_claim(&n.claim) == new_norm
+            }) {
+                let tool_clause = p
+                    .tool
+                    .as_deref()
+                    .map(|t| format!(" / `{t}`"))
+                    .unwrap_or_default();
+                let existing_preview: String = if dup.claim.chars().count() > 120 {
+                    let mut s: String = dup.claim.chars().take(120).collect();
+                    s.push('…');
+                    s
+                } else {
+                    dup.claim.clone()
+                };
+                anyhow::bail!(
+                    "Error: duplicate note. An equivalent note already exists for `{}`{} (kind: {:?}) \
+                     filed at {}. Existing claim: \"{}\". \
+                     Action: if your new note adds genuinely different content, rephrase it. \
+                     If you want to record this observation anyway (e.g. recency bump or strong \
+                     re-confirmation), re-call with `allow_duplicate=true`.",
+                    p.server,
+                    tool_clause,
+                    p.kind,
+                    dup.timestamp.format("%Y-%m-%d %H:%M UTC"),
+                    existing_preview,
+                );
+            }
+        }
+
         let note = Note {
             timestamp: Utc::now(),
             session_id: None, // could be threaded from a future request meta
@@ -1056,6 +1103,13 @@ const STOP_WORDS: &[&str] = &[
     "can", "could", "should", "would", "will",
 ];
 
+/// Normalize a note claim for duplicate detection. Collapses internal
+/// whitespace, trims, and lowercases. Two claims with the same prose
+/// content but different casing or stray double-spaces compare equal.
+fn normalize_claim(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+}
+
 fn is_meaningful_token(t: &str) -> bool {
     // Filter: must be ≥3 chars (eliminates "a", "an", "in", "of", "to", "or"
     // mid-word matches) AND not in the stop-word list. Short technical terms
@@ -1146,6 +1200,122 @@ fn _ctx_marker(_c: RequestContext<RoleServer>) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
+
+    fn test_paths() -> (TempDir, Paths) {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+        let paths = Paths {
+            cache_dir: base.join("cache"),
+            config_dir: base.join("config"),
+            manifest_dir: base.join("config/manifests"),
+            learned_dir: base.join("data/learned"),
+            cache_file: base.join("cache/index.json"),
+            docs_cache_dir: base.join("cache/docs"),
+        };
+        paths.ensure_dirs().unwrap();
+        (dir, paths)
+    }
+
+    #[test]
+    fn normalize_claim_handles_whitespace_and_case() {
+        assert_eq!(
+            normalize_claim("  Foo   bar BAZ "),
+            normalize_claim("foo bar baz")
+        );
+        assert_eq!(normalize_claim("Foo"), "foo");
+        assert_eq!(normalize_claim("a  b"), "a b");
+    }
+
+    #[test]
+    fn note_dedup_rejects_equivalent_repeat() {
+        let (_tmp, paths) = test_paths();
+        let server = LibrarianServer::new(paths);
+        let mk = |claim: &str| NoteParams {
+            server: "demo".into(),
+            tool: Some("demo_tool".into()),
+            topic: None,
+            kind: NoteKind::Tip,
+            basis: NoteBasis::Observed,
+            claim: claim.into(),
+            tags: vec![],
+            allow_duplicate: false,
+        };
+        // First note: accepted.
+        server.note_inner(mk("API key must be set")).unwrap();
+        // Same claim normalized (whitespace, case): rejected.
+        let err = server
+            .note_inner(mk("api  key  MUST be set"))
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("duplicate note") && msg.contains("allow_duplicate=true"),
+            "expected dedup error mentioning the escape hatch, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn note_dedup_distinguishes_by_kind_and_tool() {
+        let (_tmp, paths) = test_paths();
+        let server = LibrarianServer::new(paths);
+        // Same claim text, different kind → both accepted.
+        server
+            .note_inner(NoteParams {
+                server: "demo".into(),
+                tool: Some("foo".into()),
+                topic: None,
+                kind: NoteKind::Tip,
+                basis: NoteBasis::Observed,
+                claim: "shared text".into(),
+                tags: vec![],
+                allow_duplicate: false,
+            })
+            .unwrap();
+        server
+            .note_inner(NoteParams {
+                server: "demo".into(),
+                tool: Some("foo".into()),
+                topic: None,
+                kind: NoteKind::Behavior,
+                basis: NoteBasis::Observed,
+                claim: "shared text".into(),
+                tags: vec![],
+                allow_duplicate: false,
+            })
+            .unwrap();
+        // Same kind, different tool → also accepted.
+        server
+            .note_inner(NoteParams {
+                server: "demo".into(),
+                tool: Some("bar".into()),
+                topic: None,
+                kind: NoteKind::Tip,
+                basis: NoteBasis::Observed,
+                claim: "shared text".into(),
+                tags: vec![],
+                allow_duplicate: false,
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn note_dedup_allow_duplicate_bypass() {
+        let (_tmp, paths) = test_paths();
+        let server = LibrarianServer::new(paths);
+        let mk = |allow| NoteParams {
+            server: "demo".into(),
+            tool: None,
+            topic: None,
+            kind: NoteKind::Tip,
+            basis: NoteBasis::Observed,
+            claim: "same exact thing".into(),
+            tags: vec![],
+            allow_duplicate: allow,
+        };
+        server.note_inner(mk(false)).unwrap();
+        // Repeat with bypass: accepted, even though it's an exact duplicate.
+        server.note_inner(mk(true)).unwrap();
+    }
 
     #[test]
     fn stop_words_and_short_tokens_filtered() {
