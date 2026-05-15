@@ -43,6 +43,9 @@ pub enum ProbeStatus {
     NotProbeable,
     /// Indexed from a `librarian_seed_playbook` call rather than a real probe.
     Seeded,
+    /// A manifest exists on disk but the server is not currently installed or in the index.
+    /// Lets users author bootstrap playbooks before installing a server.
+    ManifestOnly,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,6 +97,22 @@ impl Index {
             }
             _ => true,
         }
+    }
+}
+
+/// A synthetic entry for a server whose manifest exists but isn't installed.
+/// Surfaced by `librarian_list` and `librarian_help` so manifests authored in
+/// advance of installation aren't invisible.
+pub fn entry_manifest_only(server: &str) -> ServerEntry {
+    ServerEntry {
+        name: server.to_string(),
+        transport_descriptor: "manifest only (not installed)".to_string(),
+        probeable: false,
+        probe_status: ProbeStatus::ManifestOnly,
+        indexed_at: Utc::now(),
+        tools: Vec::new(),
+        summary: None,
+        category: None,
     }
 }
 

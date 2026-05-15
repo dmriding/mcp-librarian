@@ -87,6 +87,53 @@ pub fn load_manifest(paths: &Paths, server: &str) -> Result<Option<Manifest>> {
     Ok(Some(manifest))
 }
 
+/// List server names that have manifests on disk (`<name>.toml`, excluding `.bak`).
+/// Used by `librarian_list` and `librarian_help` to surface manifests authored before
+/// the corresponding server is installed.
+pub fn list_manifest_servers(paths: &Paths) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    let dir = &paths.manifest_dir;
+    if !dir.exists() {
+        return Ok(out);
+    }
+    for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
+        let entry = entry.with_context(|| format!("iterating {}", dir.display()))?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+        // Strict ".toml" suffix, NOT ".toml.bak" or anything else.
+        if let Some(stem) = name.strip_suffix(".toml")
+            && !stem.is_empty()
+        {
+            out.push(stem.to_string());
+        }
+    }
+    Ok(out)
+}
+
+/// Default manifest for the librarian itself — injected when no user-authored
+/// `librarian.toml` exists. Keeps the librarian from showing as orphaned in its
+/// own list output. A user-written manifest still wins (regular load path).
+pub fn synthetic_librarian_manifest() -> Manifest {
+    Manifest {
+        meta: ManifestMeta {
+            category: Some("meta".into()),
+            summary: Some(
+                "Indexes your other MCP servers and emits playbooks on demand. \
+                 Call `librarian_help(\"librarian\")` for the full playbook."
+                    .into(),
+            ),
+            paired_cli: None,
+        },
+        ..Default::default()
+    }
+}
+
 #[allow(dead_code)]
 pub fn manifest_path_for(paths: &Paths, server: &str) -> std::path::PathBuf {
     paths.manifest_path(server)
@@ -132,6 +179,7 @@ pub fn render_list(entries: &[(ServerEntry, Option<Manifest>)], category_filter:
                     ProbeStatus::NotProbeable => " (remote)",
                     ProbeStatus::Timeout => " (probe timed out)",
                     ProbeStatus::Failed(_) => " (probe failed)",
+                    ProbeStatus::ManifestOnly => " (manifest only — not installed)",
                 };
                 let _ = writeln!(out, "- **{}**{} — {summary}", entry.name, probe_marker);
             }
@@ -194,6 +242,11 @@ fn render_overview(entry: &ServerEntry, manifest: Option<&Manifest>, notes: &[No
         ProbeStatus::Failed(msg) => {
             let _ = writeln!(out, "> *Probe failed: {msg}. Using manifest + learned notes only.*\n");
         }
+        ProbeStatus::ManifestOnly => out.push_str(
+            "> *Manifest only — this server is NOT currently installed on your system. \
+             The playbook below comes from the manifest you authored in advance. \
+             Install the server (add it to `~/.claude.json`) and run `librarian_refresh` to probe its real tool list.*\n\n",
+        ),
     }
 
     // Workflows: manifest first, then workflow-kind observed notes

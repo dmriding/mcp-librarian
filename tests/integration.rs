@@ -617,6 +617,59 @@ fn restore_errors_without_backup() {
     assert!(msg.contains("no backup"));
 }
 
+// --- manifest-only / orphan manifest flows ---
+
+#[test]
+fn list_manifest_servers_finds_only_toml_files() {
+    let (_tmp, paths) = temp_paths();
+    // Write a fake manifest and a fake backup; only the .toml should be listed.
+    std::fs::write(paths.manifest_path("foo"), "[meta]\n").unwrap();
+    std::fs::write(paths.manifest_backup_path("foo"), "[meta]\n").unwrap();
+    std::fs::write(paths.manifest_dir.join("not-a-manifest.txt"), "x").unwrap();
+    let mut servers = playbook::list_manifest_servers(&paths).unwrap();
+    servers.sort();
+    assert_eq!(servers, vec!["foo".to_string()]);
+}
+
+#[test]
+fn synthetic_librarian_manifest_has_category_and_summary() {
+    let m = playbook::synthetic_librarian_manifest();
+    assert_eq!(m.meta.category.as_deref(), Some("meta"));
+    assert!(m.meta.summary.as_ref().is_some_and(|s| s.contains("MCP")));
+}
+
+#[test]
+fn entry_manifest_only_marks_status() {
+    let e = mcp_librarian::index::entry_manifest_only("github");
+    assert_eq!(e.name, "github");
+    assert!(!e.probeable);
+    assert_eq!(e.probe_status, mcp_librarian::index::ProbeStatus::ManifestOnly);
+}
+
+#[test]
+fn render_help_shows_manifest_only_banner() {
+    let entry = mcp_librarian::index::entry_manifest_only("github");
+    let mut manifest = Manifest::default();
+    manifest.meta.summary = Some("Future GitHub MCP".into());
+    let out = playbook::render_help(&entry, Some(&manifest), &[], None);
+    assert!(out.contains("Manifest only"));
+    assert!(out.contains("NOT currently installed"));
+    assert!(out.contains("Future GitHub MCP"));
+}
+
+#[test]
+fn render_list_includes_manifest_only_marker() {
+    let entry = mcp_librarian::index::entry_manifest_only("github");
+    let mut manifest = Manifest::default();
+    manifest.meta.category = Some("developer-tools".into());
+    manifest.meta.summary = Some("Pre-authored playbook".into());
+    let pairs = vec![(entry, Some(manifest))];
+    let out = playbook::render_list(&pairs, None);
+    assert!(out.contains("**github**"));
+    assert!(out.contains("manifest only"));
+    assert!(out.contains("Pre-authored playbook"));
+}
+
 #[test]
 fn seeded_server_renders_overview() {
     let mut entry = fake_entry("claude.ai_Notion", vec![]);
