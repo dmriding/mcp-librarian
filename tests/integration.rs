@@ -871,6 +871,41 @@ fn entry_manifest_only_marks_status() {
 }
 
 #[test]
+fn manifest_only_server_renders_manifest_categories() {
+    // Regression: when entry.tools is empty (manifest-only / not installed)
+    // but the manifest defines tool_categories, render those categories
+    // directly so the user sees structure. Before this fix the overview
+    // skipped the categories section entirely.
+    let entry = mcp_librarian::index::entry_manifest_only("slack");
+    let manifest = Manifest {
+        meta: ManifestMeta {
+            summary: Some("Slack workspace".into()),
+            ..Default::default()
+        },
+        tool_categories: vec![
+            ManifestCategory {
+                name: "Channels".into(),
+                tools: vec!["list_channels".into(), "get_history".into()],
+            },
+            ManifestCategory {
+                name: "Messaging".into(),
+                tools: vec!["post_message".into()],
+            },
+        ],
+        ..Default::default()
+    };
+    let out = playbook::render_help(&entry, Some(&manifest), &[], None);
+    assert!(out.contains("Tool Categories"));
+    assert!(out.contains("Channels"));
+    assert!(out.contains("list_channels"));
+    assert!(out.contains("get_history"));
+    assert!(out.contains("Messaging"));
+    assert!(out.contains("post_message"));
+    // Banner explains why these come from manifest not probe
+    assert!(out.contains("from manifest"));
+}
+
+#[test]
 fn render_help_shows_manifest_only_banner() {
     let entry = mcp_librarian::index::entry_manifest_only("github");
     let mut manifest = Manifest::default();
