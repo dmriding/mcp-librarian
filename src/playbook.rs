@@ -719,7 +719,7 @@ pub fn render_search(query: &str, hits: &[(String, String, String, i64)]) -> Str
     }
     let _ = writeln!(
         out,
-        "\n*Call `librarian_help(server, tool)` to drill in, or use the tool's schema directly.*"
+        "\n*Call `librarian_help(server, topic)` to drill in (topic can be a tool name, workflow title, or category), or load the tool's schema directly via your client.*"
     );
     out
 }
