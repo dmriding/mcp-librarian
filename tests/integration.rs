@@ -701,6 +701,17 @@ fn librarian_unknown_topic_returns_friendly_message() {
 }
 
 #[test]
+fn librarian_onboarding_covers_the_four_steps() {
+    let out = playbook::render_onboarding();
+    assert!(out.contains("librarian_refresh"), "step 1 should call refresh");
+    assert!(out.contains("librarian_list"), "should reference list");
+    assert!(out.contains("librarian_seed_playbook"), "step 3 should call seed");
+    assert!(out.contains("librarian_manifest_write"), "should mention manifest authoring");
+    assert!(out.contains("deferred-tools"), "should mention where hosted servers come from");
+    assert!(out.contains("claude.ai_"), "should give a concrete naming example");
+}
+
+#[test]
 fn librarian_render_self_advertises_topics() {
     let s = playbook::render_self();
     assert!(s.contains("Available Topics"));
