@@ -2,6 +2,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -14,6 +15,14 @@ pub const DEFAULT_MAX_CHARS: usize = 20_000;
 pub const MAX_MAX_CHARS: usize = 50_000;
 pub const PER_SESSION_URL_CAP: usize = 50;
 pub const HTTP_TIMEOUT_SECS: u64 = 15;
+
+/// Hard cap on bytes read per response, regardless of what the agent passes
+/// for `max_chars`. Protects against a misbehaving (or malicious) server
+/// streaming gigabytes — currently `response.text()` would buffer the whole
+/// body before truncation kicks in. 5 MB is generous for any documentation
+/// page and small enough that a stuck or pathological response can't OOM
+/// the process.
+pub const MAX_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
 
 /// Polite UA so vendor admins seeing this in logs can identify the source
 /// and trace it back to the project if there's a problem.
@@ -106,6 +115,157 @@ fn domain_of(url: &str) -> Result<String> {
         .map(|s| s.to_lowercase())
 }
 
+/// Synchronous URL validation: scheme allowlist + reject literal IPs in
+/// private/loopback ranges + reject obvious loopback hostnames. This is the
+/// cheap defense; `resolve_and_check` follows up with a DNS lookup to catch
+/// hostnames that resolve to private addresses.
+///
+/// Called both at the entry to `fetch_docs` (on the agent-supplied URL) and
+/// inside the reqwest redirect callback so a 30x → localhost redirect is
+/// caught before reqwest dials it.
+pub fn check_url_sync(url: &reqwest::Url) -> Result<()> {
+    match url.scheme() {
+        "http" | "https" => {}
+        other => bail!(
+            "Error: scheme `{other}://` is not allowed in `librarian_fetch_docs` (`{url}`). \
+             Action: only http and https URLs are supported. file://, ftp://, javascript:, \
+             and others are rejected — this tool fetches public docs, not local files or \
+             internal services."
+        ),
+    }
+    let host = url.host_str().ok_or_else(|| {
+        anyhow!(
+            "Error: URL `{url}` has no host. Action: provide an absolute URL like \
+             `https://docs.example.com/...`."
+        )
+    })?;
+    // `host_str` returns bracketed form for IPv6 literals (e.g. `[::1]`).
+    // Strip them before parsing so we recognize v6 IP literals.
+    let host_for_parse = host
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(host);
+    // If the host parses as an IP literal, check it directly. Otherwise it's
+    // a domain name — string-screen the common loopback aliases here, and
+    // the DNS-level check in `resolve_and_check` handles the general case.
+    if let Ok(ip) = host_for_parse.parse::<IpAddr>() {
+        if let Some(reason) = blocked_ip_reason(&ip) {
+            bail!(
+                "Error: refusing to fetch `{url}` — host literal `{ip}` is {reason}. \
+                 Action: this tool only fetches public documentation URLs. SSRF guard \
+                 blocks loopback, link-local, private, and metadata-service addresses."
+            );
+        }
+    } else {
+        let lower = host.to_ascii_lowercase();
+        if matches!(
+            lower.as_str(),
+            "localhost" | "localhost.localdomain" | "ip6-localhost" | "ip6-loopback"
+        ) {
+            bail!(
+                "Error: refusing to fetch `{url}` — `{host}` is a loopback hostname. \
+                 Action: only public documentation hosts are supported."
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Async: DNS-resolve the host and reject if any returned IP is in a blocked
+/// range. Catches the case where a hostname like `localtest.me` resolves to
+/// `127.0.0.1`, or an attacker-controlled domain points at a private IP.
+///
+/// Limitation: this is one-shot. The actual reqwest fetch resolves again,
+/// so a DNS-rebinding attacker could in theory return a public IP here and
+/// a private IP for the real fetch. Mitigated for the most common cases by
+/// the redirect-policy re-validation and is documented in the README.
+pub async fn resolve_and_check(url: &reqwest::Url) -> Result<()> {
+    let host = url.host_str().ok_or_else(|| anyhow!("URL has no host: `{url}`"))?;
+    // If it's an IP literal, `check_url_sync` already handled it.
+    if host.parse::<IpAddr>().is_ok() {
+        return Ok(());
+    }
+    let port = url
+        .port()
+        .unwrap_or(if url.scheme() == "https" { 443 } else { 80 });
+    let host_port = format!("{host}:{port}");
+    let addrs: Vec<_> = tokio::net::lookup_host(&host_port)
+        .await
+        .with_context(|| format!("resolving `{host}`"))?
+        .collect();
+    if addrs.is_empty() {
+        bail!("Error: host `{host}` resolved to no addresses.");
+    }
+    for addr in &addrs {
+        let ip = addr.ip();
+        if let Some(reason) = blocked_ip_reason(&ip) {
+            bail!(
+                "Error: refusing to fetch `{url}` — host `{host}` resolves to {ip} which is {reason}. \
+                 Action: only public documentation URLs are supported. If you intended an internal \
+                 service, this tool can't reach it by design (SSRF guard)."
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Classify an IP into a block reason, or None if it's a safe public address.
+/// Covers loopback, link-local, private (RFC1918), CGNAT (100.64.0.0/10),
+/// this-network (0.0.0.0/8), multicast, broadcast, and unspecified — plus
+/// the IPv6 equivalents (loopback ::1, link-local fe80::/10, unique-local
+/// fc00::/7) and v4-mapped v6 addresses.
+fn blocked_ip_reason(ip: &IpAddr) -> Option<&'static str> {
+    if ip.is_unspecified() {
+        return Some("the unspecified address (0.0.0.0 / ::)");
+    }
+    if ip.is_loopback() {
+        return Some("a loopback address");
+    }
+    if ip.is_multicast() {
+        return Some("a multicast address");
+    }
+    match ip {
+        IpAddr::V4(v4) => {
+            if v4.is_private() {
+                return Some("an RFC1918 private address");
+            }
+            if v4.is_link_local() {
+                // 169.254.0.0/16 — includes the AWS / GCP / Azure metadata IPs.
+                return Some("a link-local address (includes cloud metadata services)");
+            }
+            if v4.is_broadcast() {
+                return Some("the broadcast address");
+            }
+            let octets = v4.octets();
+            // 0.0.0.0/8 — "this network" (RFC 6890)
+            if octets[0] == 0 {
+                return Some("in the 0.0.0.0/8 \"this network\" range");
+            }
+            // 100.64.0.0/10 — CGNAT (RFC 6598)
+            if octets[0] == 100 && (octets[1] & 0xC0) == 0x40 {
+                return Some("in the carrier-grade NAT range (100.64/10)");
+            }
+            None
+        }
+        IpAddr::V6(v6) => {
+            let segs = v6.segments();
+            // Unique local fc00::/7
+            if (segs[0] & 0xfe00) == 0xfc00 {
+                return Some("an IPv6 unique-local address (fc00::/7)");
+            }
+            // Link local fe80::/10
+            if (segs[0] & 0xffc0) == 0xfe80 {
+                return Some("an IPv6 link-local address (fe80::/10)");
+            }
+            // IPv4-mapped/translated — recursively check the embedded v4.
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return blocked_ip_reason(&IpAddr::V4(v4));
+            }
+            None
+        }
+    }
+}
+
 fn check_url_cap(state: &FetchState, url: &str) -> Result<()> {
     let mut set = state
         .urls_fetched_this_session
@@ -149,6 +309,35 @@ fn check_rate_limit(state: &FetchState, domain: &str) -> Result<()> {
     Ok(())
 }
 
+/// Read a reqwest Response body with a hard byte ceiling. Streams chunks,
+/// accumulates into a Vec, and bails as soon as the running total exceeds
+/// `max_bytes`. This is the defense against a server that streams unbounded
+/// data when `Content-Length` was missing or lied about.
+///
+/// On the happy path (response under cap) this is equivalent to `.bytes()`
+/// followed by `String::from_utf8_lossy` — a small extra cost we accept for
+/// the safety guarantee.
+async fn read_body_bounded(response: reqwest::Response, max_bytes: usize) -> Result<String> {
+    use futures::StreamExt;
+    let mut stream = response.bytes_stream();
+    let mut buf: Vec<u8> = Vec::with_capacity(8192.min(max_bytes));
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("streaming response body")?;
+        if buf.len().saturating_add(chunk.len()) > max_bytes {
+            bail!(
+                "Error: response body exceeded {max_bytes} bytes (per-response cap). \
+                 Action: this tool is for documentation pages, not bulk downloads. \
+                 Try a more specific URL that returns just the relevant section."
+            );
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    // Decode as UTF-8 with replacement — docs pages occasionally have stray
+    // non-UTF8 bytes (windows-1252 escapes, etc.) and a hard failure here is
+    // less useful than a best-effort decode.
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
 /// Truncate a string at a UTF-8 char boundary, never mid-codepoint.
 fn truncate_to(s: &str, max: usize) -> (&str, bool) {
     if s.len() <= max {
@@ -162,7 +351,7 @@ fn truncate_to(s: &str, max: usize) -> (&str, bool) {
     }
 }
 
-/// Fetch a docs URL with cache, rate-limit, and per-session cap.
+/// Fetch a docs URL with cache, rate-limit, per-session cap, and SSRF guard.
 pub async fn fetch_docs(
     paths: &Paths,
     state: &FetchState,
@@ -170,6 +359,14 @@ pub async fn fetch_docs(
     max_chars: usize,
 ) -> Result<FetchOutcome> {
     let max_chars = max_chars.clamp(500, MAX_MAX_CHARS);
+
+    // 0. SSRF guard — sync URL screen (scheme + literal IP). Done before
+    //    cache lookup so a poisoned cache file with a private URL can't
+    //    accidentally serve content. The cache_key is hash(url), so if an
+    //    agent passes the same private URL twice, both fail here.
+    let parsed = reqwest::Url::parse(url)
+        .with_context(|| format!("parsing URL `{url}`"))?;
+    check_url_sync(&parsed)?;
 
     // 1. Cache hit short-circuits everything — free, no cap accounting.
     let cache_path = cache_path_for(paths, url);
@@ -193,10 +390,26 @@ pub async fn fetch_docs(
     let domain = domain_of(url)?;
     check_rate_limit(state, &domain)?;
 
-    // 3. HTTP fetch.
+    // 3. DNS-level SSRF check now that we're about to actually fetch. Done
+    //    AFTER the cache check so private URLs that came in earlier and are
+    //    now in cache (theoretically impossible since check_url_sync would
+    //    have blocked the prior write) don't pay the resolve cost.
+    resolve_and_check(&parsed).await?;
+
+    // 4. HTTP fetch. Redirect policy re-validates each hop's URL so a 30x
+    //    bouncing to localhost/private is blocked before reqwest follows it.
     let client = reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 5 {
+                return attempt.error("too many redirects (max 5)");
+            }
+            match check_url_sync(attempt.url()) {
+                Ok(()) => attempt.follow(),
+                Err(e) => attempt.error(format!("{e:#}")),
+            }
+        }))
         .build()
         .context("building HTTP client")?;
     let response = client
@@ -215,8 +428,25 @@ pub async fn fetch_docs(
             status.as_u16()
         );
     }
-    let body = response
-        .text()
+
+    // Fast-fail on declared content length: if the server tells us up front
+    // that the body exceeds our ceiling, refuse before streaming. Optional —
+    // many servers omit Content-Length, in which case we fall through to the
+    // streaming check below.
+    if let Some(len) = response.content_length()
+        && len as usize > MAX_RESPONSE_BYTES
+    {
+        bail!(
+            "Error: response from `{url}` declares Content-Length {len}, which exceeds the \
+             librarian's per-response cap of {MAX_RESPONSE_BYTES} bytes. \
+             Action: this tool is for documentation pages, not bulk downloads."
+        );
+    }
+
+    // Stream the body with an enforced byte ceiling. We can't trust the
+    // server to honor Content-Length, so we count bytes as they arrive and
+    // bail the moment we exceed the cap.
+    let body = read_body_bounded(response, MAX_RESPONSE_BYTES)
         .await
         .with_context(|| format!("reading body from `{url}`"))?;
 
@@ -254,6 +484,91 @@ pub async fn fetch_docs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
+
+    fn url(s: &str) -> reqwest::Url {
+        reqwest::Url::parse(s).unwrap()
+    }
+
+    #[test]
+    fn check_url_sync_rejects_non_http_schemes() {
+        assert!(check_url_sync(&url("file:///etc/passwd")).is_err());
+        // ftp is parseable by reqwest::Url even though it can't fetch it
+        assert!(check_url_sync(&url("ftp://example.com/x")).is_err());
+        // javascript: parses as a non-host URL; we reject via the scheme check
+        if let Ok(u) = reqwest::Url::parse("javascript:alert(1)") {
+            assert!(check_url_sync(&u).is_err());
+        }
+    }
+
+    #[test]
+    fn check_url_sync_accepts_public_http_and_https() {
+        check_url_sync(&url("https://docs.example.com/foo")).unwrap();
+        check_url_sync(&url("http://docs.example.com/foo")).unwrap();
+    }
+
+    #[test]
+    fn check_url_sync_rejects_loopback_literals() {
+        assert!(check_url_sync(&url("http://127.0.0.1/admin")).is_err());
+        assert!(check_url_sync(&url("https://127.0.0.1:8443/")).is_err());
+        assert!(check_url_sync(&url("http://[::1]/")).is_err());
+    }
+
+    #[test]
+    fn check_url_sync_rejects_private_ranges() {
+        assert!(check_url_sync(&url("http://10.0.0.1/")).is_err());
+        assert!(check_url_sync(&url("http://10.255.255.255/")).is_err());
+        assert!(check_url_sync(&url("http://172.16.0.1/")).is_err());
+        assert!(check_url_sync(&url("http://172.31.0.1/")).is_err());
+        assert!(check_url_sync(&url("http://192.168.1.1/")).is_err());
+        // 100.64/10 — CGNAT
+        assert!(check_url_sync(&url("http://100.64.0.1/")).is_err());
+        // 0.0.0.0/8 — this network
+        assert!(check_url_sync(&url("http://0.0.0.0/")).is_err());
+        assert!(check_url_sync(&url("http://0.1.2.3/")).is_err());
+    }
+
+    #[test]
+    fn check_url_sync_rejects_link_local_and_metadata() {
+        // Link-local 169.254/16 — includes 169.254.169.254 (AWS / Azure / GCP metadata)
+        assert!(check_url_sync(&url("http://169.254.169.254/latest/meta-data/")).is_err());
+        assert!(check_url_sync(&url("http://169.254.1.1/")).is_err());
+        // IPv6 link-local
+        assert!(check_url_sync(&url("http://[fe80::1]/")).is_err());
+        // IPv6 unique-local
+        assert!(check_url_sync(&url("http://[fc00::1]/")).is_err());
+        assert!(check_url_sync(&url("http://[fd00::1]/")).is_err());
+    }
+
+    #[test]
+    fn check_url_sync_rejects_loopback_hostnames() {
+        assert!(check_url_sync(&url("http://localhost/admin")).is_err());
+        assert!(check_url_sync(&url("http://LOCALHOST:8080/")).is_err());
+        assert!(check_url_sync(&url("http://localhost.localdomain/")).is_err());
+        assert!(check_url_sync(&url("http://ip6-localhost/")).is_err());
+    }
+
+    #[test]
+    fn check_url_sync_rejects_ipv4_mapped_v6_private() {
+        // ::ffff:127.0.0.1 — IPv4-mapped IPv6 of loopback
+        assert!(check_url_sync(&url("http://[::ffff:127.0.0.1]/")).is_err());
+        // ::ffff:10.0.0.1 — IPv4-mapped IPv6 of private range
+        assert!(check_url_sync(&url("http://[::ffff:10.0.0.1]/")).is_err());
+    }
+
+    #[test]
+    fn blocked_ip_reason_identifies_each_class() {
+        use std::net::{Ipv4Addr, Ipv6Addr};
+        assert!(blocked_ip_reason(&IpAddr::from(Ipv4Addr::new(127, 0, 0, 1))).is_some());
+        assert!(blocked_ip_reason(&IpAddr::from(Ipv4Addr::new(192, 168, 1, 1))).is_some());
+        assert!(blocked_ip_reason(&IpAddr::from(Ipv4Addr::new(169, 254, 169, 254))).is_some());
+        assert!(blocked_ip_reason(&IpAddr::from(Ipv6Addr::from_str("::1").unwrap())).is_some());
+        assert!(blocked_ip_reason(&IpAddr::from(Ipv6Addr::from_str("fe80::1").unwrap())).is_some());
+        // Pass-through cases — non-blocked public addresses
+        assert!(blocked_ip_reason(&IpAddr::from(Ipv4Addr::new(8, 8, 8, 8))).is_none());
+        assert!(blocked_ip_reason(&IpAddr::from(Ipv4Addr::new(1, 1, 1, 1))).is_none());
+        assert!(blocked_ip_reason(&IpAddr::from(Ipv6Addr::from_str("2606:4700::1").unwrap())).is_none());
+    }
 
     #[test]
     fn cache_key_is_stable_and_distinct() {

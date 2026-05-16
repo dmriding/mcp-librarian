@@ -51,6 +51,7 @@ reqwest = { version = "0.12", default-features = false, features = [
     "gzip",
     "http2",
     "charset",
+    "stream",
 ] }
 html2text = "0.12"
 fs4 = "0.13"
