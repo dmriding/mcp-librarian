@@ -178,13 +178,24 @@ pub fn render_list(entries: &[(ServerEntry, Option<Manifest>)], category_filter:
                     .or_else(|| entry.summary.clone())
                     .or_else(|| auto_summary(entry))
                     .unwrap_or_else(|| "*(no summary)*".to_string());
-                let probe_marker = match &entry.probe_status {
-                    ProbeStatus::Ok => "",
-                    ProbeStatus::Seeded => " (seeded)",
-                    ProbeStatus::NotProbeable => " (remote)",
-                    ProbeStatus::Timeout => " (probe timed out)",
-                    ProbeStatus::Failed(_) => " (probe failed)",
-                    ProbeStatus::ManifestOnly => " (manifest only — not installed)",
+                // Marker quality: a bare `(seeded)` told us nothing about whether
+                // the entry was a thin auth-handshake stub or a rich 18-tool seed.
+                // Include the tool count so a glance at `librarian_list` tells you
+                // which seeds are worth drilling into and which are placeholders.
+                let probe_marker: String = match &entry.probe_status {
+                    ProbeStatus::Ok => String::new(),
+                    ProbeStatus::Seeded => {
+                        let n = entry.tools.len();
+                        match n {
+                            0 => " (seeded — no tools)".to_string(),
+                            1 => " (seeded — 1 tool)".to_string(),
+                            _ => format!(" (seeded — {n} tools)"),
+                        }
+                    }
+                    ProbeStatus::NotProbeable => " (remote)".to_string(),
+                    ProbeStatus::Timeout => " (probe timed out)".to_string(),
+                    ProbeStatus::Failed(_) => " (probe failed)".to_string(),
+                    ProbeStatus::ManifestOnly => " (manifest only — not installed)".to_string(),
                 };
                 let _ = writeln!(out, "- **{}**{} — {summary}", entry.name, probe_marker);
             }

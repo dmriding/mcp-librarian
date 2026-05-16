@@ -701,6 +701,44 @@ fn librarian_unknown_topic_returns_friendly_message() {
 }
 
 #[test]
+fn list_marker_shows_seeded_tool_count() {
+    // 0 tools — explicit "no tools" callout
+    let mut empty = fake_entry("auth_only", vec![]);
+    empty.probe_status = ProbeStatus::Seeded;
+
+    // 1 tool — singular
+    let mut single = fake_entry("one_tool", vec![("foo", "", vec![])]);
+    single.probe_status = ProbeStatus::Seeded;
+
+    // Many tools — plural with count
+    let mut many = fake_entry(
+        "rich",
+        vec![
+            ("a", "", vec![]),
+            ("b", "", vec![]),
+            ("c", "", vec![]),
+            ("d", "", vec![]),
+        ],
+    );
+    many.probe_status = ProbeStatus::Seeded;
+
+    let pairs = vec![(empty, None), (single, None), (many, None)];
+    let out = playbook::render_list(&pairs, None);
+    assert!(out.contains("(seeded — no tools)"), "should distinguish zero-tool seeds: {out}");
+    assert!(out.contains("(seeded — 1 tool)"));
+    assert!(out.contains("(seeded — 4 tools)"));
+    // Old uniform "(seeded)" marker should no longer appear
+    let lines_with_bare_seeded: Vec<&str> = out
+        .lines()
+        .filter(|l| l.contains("(seeded)"))
+        .collect();
+    assert!(
+        lines_with_bare_seeded.is_empty(),
+        "uniform `(seeded)` marker should be replaced: {lines_with_bare_seeded:?}"
+    );
+}
+
+#[test]
 fn auto_grouping_recurses_when_all_tools_share_prefix() {
     // Notion-shaped: 14 tools all prefixed `notion-`, varied second tokens.
     // Without recursion → one giant "notion" bucket. With recursion → useful
