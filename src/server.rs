@@ -788,11 +788,20 @@ impl LibrarianServer {
                 };
                 let token = self.issue_token(pending);
 
+                // IMPORTANT: this preview is rendered by the MCP client. Claude
+                // Desktop has been observed to hang for minutes on previews that
+                // combine em-dashes, angle-bracket placeholders, and nested
+                // backticks. Keep this body character-conservative: ASCII hyphens
+                // only, no `<x>` placeholders, no backticks around content that
+                // already contains punctuation. See docs/tech_debt.md for the
+                // full background.
+                let safe_summary = sanitize_for_preview(entry.summary.as_deref());
+
                 let mut preview = String::new();
-                preview.push_str("## SEED REMOVAL — PREVIEW (NOT YET COMMITTED)\n\n");
+                preview.push_str("## SEED REMOVAL - PREVIEW (NOT YET COMMITTED)\n\n");
                 let _ = writeln!(preview, "Server: {}", entry.name);
                 let _ = writeln!(preview, "State:  {:?}", entry.probe_status);
-                if let Some(s) = &entry.summary {
+                if let Some(s) = &safe_summary {
                     let _ = writeln!(preview, "Summary: {s}");
                 }
                 if let Some(c) = &entry.category {
@@ -802,18 +811,18 @@ impl LibrarianServer {
 
                 preview.push('\n');
                 if manifest_exists || in_client_config {
-                    preview.push_str("**Warning — removal will likely not be permanent:**\n");
+                    preview.push_str("Warning - removal will not be permanent in this case:\n");
                     if manifest_exists {
                         preview.push_str(
-                            "- A manifest file exists for this server. After index removal it \
-                             will re-surface as `(manifest only — not installed)` in `librarian_list`. \
-                             To remove fully, delete the manifest file too.\n",
+                            "  - A manifest file exists for this server. After index removal it \
+                             will re-surface as a manifest-only entry in librarian_list. To \
+                             remove fully, delete the manifest file too.\n",
                         );
                     }
                     if in_client_config {
                         preview.push_str(
-                            "- This server is in your MCP client config. The next \
-                             `librarian_refresh` will re-add it. To remove permanently, also \
+                            "  - This server is in your MCP client config. The next \
+                             librarian_refresh will re-add it. To remove permanently, also \
                              remove the entry from your client config.\n",
                         );
                     }
@@ -821,18 +830,19 @@ impl LibrarianServer {
                 }
 
                 preview.push_str(
-                    "Learned notes (`<data>/learned/<server>.jsonl`) are NOT deleted — they \
-                     persist on disk and reappear if the server is re-seeded under the same name.\n\n",
+                    "Learned notes (the per-server jsonl file under data/learned) are NOT \
+                     deleted. They persist on disk and reappear if the server is re-seeded \
+                     under the same name.\n\n",
                 );
 
                 let _ = writeln!(
                     preview,
                     "---\n\
-                     **REVIEW REQUIRED.** Show the preview above to the user. \
-                     Ask them to type **\"I agree\"** or **\"yes\"** to commit. \
-                     Once they approve, re-call `librarian_seed_remove` with:\n\
-                     - `server=\"{}\"`,\n\
-                     - `confirm_token=\"{token}\"`.\n\n\
+                     REVIEW REQUIRED. Show the preview above to the user. Ask them to type \
+                     \"I agree\" or \"yes\" to commit. Once they approve, re-call \
+                     librarian_seed_remove with:\n  \
+                     server=\"{}\",\n  \
+                     confirm_token=\"{token}\".\n\n\
                      Token expires in {} minutes and is single-use.",
                     p.server,
                     PENDING_WRITE_TTL_SECS / 60,
@@ -1582,6 +1592,29 @@ fn seed_batch_fingerprint(items: &[SeedParams]) -> String {
     serde_json::to_string(items).unwrap_or_default()
 }
 
+/// Conservative ASCII normalization for content that flows verbatim into a
+/// propose-preview response. Claude Desktop has been observed to hang on
+/// previews containing em-dashes (U+2014) and en-dashes (U+2013) embedded in
+/// otherwise-normal text — its incremental markdown renderer appears to wait
+/// for tokens it never receives. Other MCP clients (Codex, Claude Code) are
+/// not affected. Cheap to apply defensively at the boundary.
+///
+/// Strips: em-dash → hyphen, en-dash → hyphen, horizontal ellipsis → "...",
+/// non-breaking space → space. Leaves regular Unicode (accented letters etc.)
+/// untouched. Returns None if input was None.
+fn sanitize_for_preview(s: Option<&str>) -> Option<String> {
+    s.map(|raw| {
+        raw.chars()
+            .map(|c| match c {
+                '\u{2014}' | '\u{2013}' => "-".to_string(),
+                '\u{2026}' => "...".to_string(),
+                '\u{00A0}' => " ".to_string(),
+                other => other.to_string(),
+            })
+            .collect()
+    })
+}
+
 /// Normalize a note claim for duplicate detection. Collapses internal
 /// whitespace, trims, and lowercases. Two claims with the same prose
 /// content but different casing or stray double-spaces compare equal.
@@ -1778,6 +1811,85 @@ mod tests {
                 allow_duplicate: false,
             })
             .unwrap();
+    }
+
+    #[test]
+    fn sanitize_for_preview_strips_em_dashes_and_friends() {
+        assert_eq!(
+            sanitize_for_preview(Some("foo — bar")).unwrap(),
+            "foo - bar"
+        );
+        assert_eq!(
+            sanitize_for_preview(Some("a–b")).unwrap(),
+            "a-b",
+        );
+        assert_eq!(
+            sanitize_for_preview(Some("yes…")).unwrap(),
+            "yes...",
+        );
+        // Non-breaking space → regular space
+        assert_eq!(
+            sanitize_for_preview(Some("foo\u{00A0}bar")).unwrap(),
+            "foo bar",
+        );
+        // ASCII passes through untouched
+        assert_eq!(
+            sanitize_for_preview(Some("foo - bar")).unwrap(),
+            "foo - bar",
+        );
+        // Regular Unicode (accents, emoji) is preserved
+        assert_eq!(
+            sanitize_for_preview(Some("café 🎉")).unwrap(),
+            "café 🎉",
+        );
+        assert_eq!(sanitize_for_preview(None), None);
+    }
+
+    #[test]
+    fn seed_remove_preview_has_no_known_hang_triggers() {
+        // Regression guard: the seed_remove preview must not contain the
+        // character/markup combinations that hung Claude Desktop's renderer
+        // (em-dashes, angle-bracket placeholders, backticks around content
+        // with punctuation). If a future edit reintroduces any of these,
+        // this test catches it before deploy.
+        let (_tmp, paths) = test_paths();
+        let server = LibrarianServer::new(paths);
+        // Seed an entry with an em-dash in its summary to ensure the
+        // sanitizer pipeline strips it from the rendered preview.
+        server
+            .seed_inner(SeedParams {
+                server: "claude.ai_Probe".into(),
+                summary: Some(
+                    "Probe MCP via claude.ai mediator — exposes auth tools."
+                        .into(),
+                ),
+                category: Some("comms".into()),
+                tools: vec![SeedTool {
+                    name: "auth".into(),
+                    description: "".into(),
+                    required: vec![],
+                    properties: Default::default(),
+                }],
+            })
+            .unwrap();
+
+        let preview = server
+            .seed_remove_inner(SeedRemoveParams {
+                server: "claude.ai_Probe".into(),
+                confirm_token: None,
+            })
+            .unwrap();
+
+        assert!(!preview.contains('\u{2014}'), "em-dash in preview: {preview}");
+        assert!(!preview.contains('\u{2013}'), "en-dash in preview");
+        assert!(
+            !preview.contains("<data>") && !preview.contains("<server>"),
+            "angle-bracket placeholders in preview: {preview}"
+        );
+        // Confirm the actual content still serves its purpose
+        assert!(preview.contains("SEED REMOVAL"));
+        assert!(preview.contains("claude.ai_Probe"));
+        assert!(preview.contains("confirm_token="));
     }
 
     #[test]
