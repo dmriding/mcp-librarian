@@ -701,6 +701,98 @@ fn librarian_unknown_topic_returns_friendly_message() {
 }
 
 #[test]
+fn auto_grouping_recurses_when_all_tools_share_prefix() {
+    // Notion-shaped: 14 tools all prefixed `notion-`, varied second tokens.
+    // Without recursion → one giant "notion" bucket. With recursion → useful
+    // create/update/get/etc. sub-buckets.
+    let names = [
+        "notion-create-pages",
+        "notion-create-database",
+        "notion-create-view",
+        "notion-create-comment",
+        "notion-update-page",
+        "notion-update-data-source",
+        "notion-update-view",
+        "notion-get-comments",
+        "notion-get-users",
+        "notion-get-teams",
+        "notion-fetch",
+        "notion-search",
+        "notion-duplicate-page",
+        "notion-move-pages",
+    ];
+    let entry = fake_entry(
+        "claude.ai_Notion",
+        names.iter().map(|n| (*n, "", vec![])).collect(),
+    );
+    let out = playbook::render_help(&entry, None, &[], None);
+
+    // Should have multiple sub-buckets, not one big "notion" bucket
+    assert!(out.contains("**create**"), "should produce a create bucket");
+    assert!(out.contains("**update**"), "should produce an update bucket");
+    assert!(out.contains("**get**"), "should produce a get bucket");
+    // Not a single "notion" bucket containing everything
+    let notion_bucket_line = out.lines().find(|l| l.starts_with("- **notion**:"));
+    assert!(
+        notion_bucket_line.is_none(),
+        "should NOT collapse into one flat notion bucket"
+    );
+}
+
+#[test]
+fn auto_grouping_does_not_recurse_when_already_multiple_groups() {
+    // forge_*, mantis_*, etc. — multiple top-level prefixes, no recursion needed.
+    let entry = fake_entry(
+        "mixed",
+        vec![
+            ("forge_sprint_start", "", vec![]),
+            ("forge_sprint_status", "", vec![]),
+            ("mantis_find_market", "", vec![]),
+            ("mantis_log_intel", "", vec![]),
+        ],
+    );
+    let out = playbook::render_help(&entry, None, &[], None);
+    assert!(out.contains("**forge**"), "forge bucket should exist");
+    assert!(out.contains("**mantis**"), "mantis bucket should exist");
+}
+
+#[test]
+fn auto_grouping_skips_recursion_when_not_useful() {
+    // 4 tools all unique second tokens — recursion would just produce a flat
+    // list with weird headers. Stay with the single bucket.
+    let entry = fake_entry(
+        "foo",
+        vec![
+            ("foo-alpha", "", vec![]),
+            ("foo-beta", "", vec![]),
+            ("foo-gamma", "", vec![]),
+            ("foo-delta", "", vec![]),
+        ],
+    );
+    let out = playbook::render_help(&entry, None, &[], None);
+    // Should keep the flat foo bucket since every second-token sub-bucket
+    // would have only 1 tool.
+    assert!(out.contains("**foo**:"), "should keep flat foo bucket: {out}");
+    assert!(!out.contains("**alpha**"));
+    assert!(!out.contains("**beta**"));
+}
+
+#[test]
+fn auto_grouping_skips_recursion_below_threshold() {
+    // 3 tools — too few to bother recursing.
+    let entry = fake_entry(
+        "tiny",
+        vec![
+            ("tiny-a-1", "", vec![]),
+            ("tiny-b-2", "", vec![]),
+            ("tiny-c-3", "", vec![]),
+        ],
+    );
+    let out = playbook::render_help(&entry, None, &[], None);
+    assert!(out.contains("**tiny**:"));
+}
+
+#[test]
 fn seeded_help_shows_manifest_authoring_footer() {
     // A bare seeded entry (no manifest) should nudge the agent toward
     // authoring a manifest. Closes the loop between seed → curated playbook.
