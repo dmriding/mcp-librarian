@@ -24,7 +24,8 @@ I built this for me, and I run it daily with Claude Code and Codex. Patches welc
 14. [Environment & CLI](#environment--cli)
 15. [Security & storage](#security--storage)
 16. [Known limitations](#known-limitations)
-17. [Licenses & contributing](#licenses--contributing)
+17. [Project docs](#project-docs)
+18. [Licenses & contributing](#licenses--contributing)
 
 ---
 
@@ -430,8 +431,14 @@ Response bodies are capped at 5 MiB to prevent OOM.
 - **No PII scrubbing.** Convention: `claim` is prose, not literal arg blobs.
 - **Single-host only.** No clustering, no shared state across machines. Each machine has its own librarian state.
 
+## Project docs
+
+- [CHANGELOG.md](CHANGELOG.md) — release history, [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format
+- [CONTRIBUTING.md](CONTRIBUTING.md) — dev loop, style, philosophy (code-rule gates, loud failures, atomic writes)
+- [SECURITY.md](SECURITY.md) — threat model, what we defend against, what we deliberately don't, how to report
+
 ## Licenses & contributing
 
 Dual-licensed under [MIT](LICENSE-MIT) and [Apache-2.0](LICENSE-APACHE). Pick whichever fits.
 
-Patches welcome. Feature requests without patches will be politely declined — this is a personal tool, OSS'd because someone else might want it. Open an issue if you want to discuss before sending a PR.
+Patches welcome. Feature requests without patches will be politely declined — this is a personal tool, OSS'd because someone else might want it. See [CONTRIBUTING.md](CONTRIBUTING.md) for the dev loop and house style.
