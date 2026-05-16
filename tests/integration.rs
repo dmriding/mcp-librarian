@@ -701,6 +701,46 @@ fn librarian_unknown_topic_returns_friendly_message() {
 }
 
 #[test]
+fn seeded_help_shows_manifest_authoring_footer() {
+    // A bare seeded entry (no manifest) should nudge the agent toward
+    // authoring a manifest. Closes the loop between seed → curated playbook.
+    let mut entry = fake_entry("claude.ai_Foo", vec![("foo_x", "do x", vec![])]);
+    entry.probe_status = ProbeStatus::Seeded;
+    let out = playbook::render_help(&entry, None, &[], None);
+    assert!(out.contains("seeded entry"), "should call out the seed state");
+    assert!(out.contains("librarian_fetch_docs"), "should suggest fetch_docs");
+    assert!(out.contains("manifest_schema"), "should point at schema topic");
+    assert!(out.contains("librarian_manifest_write"), "should reference the write tool");
+    assert!(out.contains("claude.ai_Foo"), "should embed the server name in the example");
+}
+
+#[test]
+fn probed_help_does_not_show_seed_footer() {
+    // A real probed server with a manifest is already complete — no nudge.
+    let entry = fake_entry("playwright", vec![("browser_click", "click", vec![])]);
+    // entry has default probe_status Ok via fake_entry
+    let manifest = Manifest {
+        meta: ManifestMeta {
+            summary: Some("real manifest".into()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let out = playbook::render_help(&entry, Some(&manifest), &[], None);
+    assert!(!out.contains("seeded entry"), "manifest-backed entries should NOT show seed nudge");
+}
+
+#[test]
+fn seeded_help_without_tools_skips_footer() {
+    // Edge case: a seeded entry with no tools wouldn't benefit from the
+    // manifest pointer (there's nothing for the manifest to categorize yet).
+    let mut entry = fake_entry("empty", vec![]);
+    entry.probe_status = ProbeStatus::Seeded;
+    let out = playbook::render_help(&entry, None, &[], None);
+    assert!(!out.contains("seeded entry"), "no-tools seeded entry skips the footer");
+}
+
+#[test]
 fn librarian_onboarding_covers_the_four_steps() {
     let out = playbook::render_onboarding();
     assert!(out.contains("librarian_refresh"), "step 1 should call refresh");
