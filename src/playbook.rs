@@ -366,6 +366,27 @@ fn render_overview(entry: &ServerEntry, manifest: Option<&Manifest>, notes: &[No
         );
     }
 
+    // Seed-only nudge: if this entry was seeded (no manifest authored) and has
+    // some tools, point the agent at the manifest-authoring flow. Closes the
+    // discovery loop between "the server exists in the index" and "the server
+    // has a real curated playbook".
+    if manifest.is_none()
+        && matches!(entry.probe_status, ProbeStatus::Seeded)
+        && !entry.tools.is_empty()
+    {
+        out.push_str("\n---\n");
+        let _ = writeln!(
+            out,
+            "*This is a **seeded entry** — names and a one-line summary, no curated workflows \
+             or gotchas. For a richer playbook, fetch the vendor's MCP docs via \
+             `librarian_fetch_docs(url=...)` and author a manifest. \
+             Schema reference: `librarian_help(\"librarian\", \"manifest_schema\")`. \
+             Commit via `librarian_manifest_write(server=\"{}\", manifest_toml=\"...\")` — \
+             propose first (you'll get a preview + token), the user approves, then commit.*",
+            entry.name
+        );
+    }
+
     out
 }
 
