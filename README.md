@@ -1,59 +1,155 @@
 # mcp-librarian
 
-An MCP server that indexes your other MCP servers and emits playbooks on demand. The agent calls one tool, gets the landscape; drills into a single server when needed. Designed to get smarter as you use it — agents file notes about what they learn, and future sessions inherit the knowledge.
+> An MCP server that indexes your other MCP servers and emits playbooks on demand.
 
-I built this for me. Patches welcome; feature requests without patches will be politely declined.
+I built this for me, and I run it daily with Claude Code and Codex. Patches welcome; feature requests without patches will be politely declined.
 
-## What it does
+---
 
-A single Rust MCP server exposing ten tools to the agent:
+## Contents
 
-| Tool | What it does |
-|---|---|
-| `librarian_list` | Directory of all known MCP servers, grouped by category |
-| `librarian_help` | Playbook for one server. No `topic` = overview; with `topic` = drill-down. `server="librarian"` returns the librarian's own playbook; `topic="manifest_schema"` returns the TOML reference |
-| `librarian_search` | Fuzzy-match across every known tool's name + description |
-| `librarian_note` | Agent appends an observation about a server's behavior. Soft-dedup at write time; `allow_duplicate=true` to bypass |
-| `librarian_seed_playbook` | Bootstrap a server entry from the tool list the agent already sees |
-| `librarian_refresh` | Reprobe local stdio servers; flag notes whose schemas drifted |
-| `librarian_manifest_write` | Author or replace a manifest. Two-step propose/commit gate with a single-use token |
-| `librarian_manifest_diff` | Show what changed between current and the auto-backup |
-| `librarian_manifest_restore` | Swap current ↔ backup. Two-step propose/commit gate |
-| `librarian_fetch_docs` | Fetch public documentation pages (HTTP/HTTPS only, SSRF-guarded) for bootstrapping a manifest from vendor docs |
+1. [The problem](#the-problem)
+2. [The solution](#the-solution)
+3. [What this is](#what-this-is)
+4. [What this is not](#what-this-is-not)
+5. [How it works (mental model)](#how-it-works-mental-model)
+6. [A 60-second tour from the agent's POV](#a-60-second-tour-from-the-agents-pov)
+7. [Install](#install)
+8. [Configure (add to your MCP client)](#configure-add-to-your-mcp-client)
+9. [The ten tools](#the-ten-tools)
+10. [Manifests — your canonical playbooks](#manifests--your-canonical-playbooks)
+11. [Workflow recipes](#workflow-recipes)
+12. [Storage paths](#storage-paths)
+13. [Environment & CLI](#environment--cli)
+14. [Security & storage](#security--storage)
+15. [Known limitations](#known-limitations)
+16. [Licenses & contributing](#licenses--contributing)
 
-The agent's discovery cost collapses from N tool schemas to one call returning prose.
+---
 
-## Why
+## The problem
 
-I have a lot of MCP servers connected to Claude Code. Deferred loading means the agent doesn't actually see tool schemas until it explicitly searches for them, and most MCP servers ship no `help`-style orientation tool, so the agent has to flail. This solves that for me — every server gets a uniform overview / drill-down playbook surface, whether or not the server itself was designed for that.
+You connect a coding agent (Claude Code, Codex, Claude Desktop, etc.) to half a dozen MCP servers. Each server exposes 5–50 tools. Most modern clients use **deferred loading** — the agent only sees tool *names* up front, and has to explicitly request a full schema to actually call a tool.
 
-## How it stays useful over time
+In practice this means:
 
-Two-layer storage, both human-readable, both editable:
+- The agent **doesn't know what's available** without paying for schemas it hasn't seen
+- Most MCP servers ship **no `help`-style orientation tool**, so the agent flails: random tool calls, schema errors, wasted context
+- There's **no shared memory** between sessions — an observation one session pays a price to learn is lost the next time
+- **Hosted/cloud MCP servers** (the `claude.ai_*` family, Notion, Slack, Figma) can't be probed by spawning. Your agent literally cannot inspect them — only the docs the vendor provides on the web
+- **Authoring a curated playbook** for a server is something every team needs but no one has a standard place for
 
-- **`<config>/manifests/<server>.toml`** — *your* canon. Hand-authored TOML, takes priority in rendering. Define categories, workflows, topics, gotchas — like a curated `help` for that server.
-- **`<data>/learned/<server>.jsonl`** — *agent* append-only observations. Every note carries a `kind` (`workflow` / `arg_shape` / `behavior` / `error_pattern` / `tip` / `example`) and a `basis` (`observed` for things just witnessed, `inferred` for speculation — rendered weaker).
+The agent's discovery cost scales with the number of MCP servers, and the wasted-token cost compounds with every new session.
 
-After a `librarian_refresh`, any note whose underlying tool's arg shape has drifted gets flagged `⚠possibly stale` — not deleted, just marked. You read and decide.
+## The solution
+
+One small MCP server that indexes all your *other* MCP servers and serves curated playbooks on demand. The agent makes **one tool call** (`librarian_list`) and gets the entire landscape grouped by category. Drilling into a single server (`librarian_help`) returns a hand-curated workflow + categories + gotchas summary, plus learned observations from prior sessions. Searching across tools (`librarian_search`) is fuzzy and cheap.
+
+The playbook for each server lives in two layers:
+
+- **Manifests** — *your* canonical TOML. Hand-authored or AI-authored-then-approved-by-you.
+- **Learned notes** — agent-appended observations, append-only, tagged with `kind` and `basis`. The librarian re-renders the playbook with manifest content first and observed notes underneath.
+
+For hosted servers the librarian can't probe, there's `librarian_fetch_docs` (SSRF-guarded) plus `librarian_seed_playbook` — read the vendor's public docs, synthesize a manifest, persist it once, and now every session has the playbook.
+
+The agent's discovery cost collapses from "N schemas × M tools each" to **one tool call returning prose**.
+
+## What this is
+
+- **An MCP server that indexes other MCP servers.** It runs locally over stdio, like every other MCP server.
+- **A two-layer knowledge store.** Manifests are your canon. Learned notes accrete from agent observations across sessions.
+- **A bootstrapping tool for hosted MCP servers.** Fetches public docs, lets the agent synthesize a playbook, then commits it via a propose/commit gate so you've reviewed before it lands on disk.
+- **Concurrent-safe.** Multiple clients (Claude Code + Codex side-by-side) writing simultaneously are serialized via a file lock; manifest writes are atomic.
+- **Security-conscious.** SSRF guards on outbound fetch, path-traversal validation on every `server` parameter, single-use tokens with content fingerprints on every write.
+- **Rust, no runtime dependencies.** Single statically-linked binary. ~12 MB.
+- **Designed for the worst-case AI.** Gates are *code rules*, not social rules in tool descriptions. An agent that ignores instructions still can't write a manifest without producing a structured preview first.
+
+## What this is not
+
+- **It is NOT a proxy** for your MCP servers. It does not invoke their tools. It only describes them.
+- **It does NOT manage credentials.** API keys / tokens live in your MCP client config (`.claude.json` / `claude_desktop_config.json`) and get passed to spawned servers as env vars. The librarian never reads them.
+- **It is NOT a multi-user or cloud service.** Single-user, local-only. Your data stays on your disk.
+- **It is NOT a replacement** for the MCP servers it indexes. It's a directory/playbook layer on top.
+- **It is NOT a generic notes system.** Notes are scoped to (server, tool, kind, basis). It's a knowledge graph for MCP behavior, not for arbitrary prose.
+- **It does NOT scrub PII.** Convention: notes are prose, not literal arg blobs. No customer data in, no customer data out.
+- **It does NOT auto-encrypt** stored data. Manifests/notes aren't sensitive (see [Security & storage](#security--storage) for the threat model and why volume-level encryption is the right answer if you need it).
+
+## How it works (mental model)
+
+Three pieces of state live on disk, all human-readable, all editable:
+
+```
+%APPDATA%\netviper\mcp-librarian\            (Windows; macOS/Linux follow `directories` crate)
+├── config/
+│   ├── manifests/
+│   │   ├── slack.toml               # your canon for slack
+│   │   ├── slack.toml.bak           # auto-backup written before every commit
+│   │   └── playwright.toml          # …
+│   └── .librarian.lock              # advisory file lock for cross-process writes
+├── cache/
+│   ├── index.json                   # probed tool names + descriptions (the index)
+│   └── docs/<hash>.json             # cached responses from librarian_fetch_docs
+└── data/
+    └── learned/
+        ├── slack.jsonl              # agent-appended observations, append-only
+        └── playwright.jsonl
+```
+
+**Rendering precedence** when an agent calls `librarian_help("slack")`:
+
+1. The manifest's `meta.summary`, `workflows`, `tool_categories`, `topics`, `gotchas` render first — they're *your* curated content
+2. The indexed tools (from probing the live server) are grouped under the manifest's `tool_categories`, or auto-grouped by name prefix if no categories defined
+3. Learned notes with `basis="observed"` render under their relevant sections (workflows → Key Workflows, behavior/tip/error_pattern → Gotchas)
+4. Learned notes with `basis="inferred"` render in a weaker, separately-labeled section so a future agent knows to trust them less
+
+When you run `librarian_refresh`, the librarian re-probes every stdio MCP server, compares each tool's argument shape against the prior index, and **flags learned notes about tools whose schemas drifted** with a `⚠possibly stale` marker. Stale notes are not deleted — you read them and decide.
+
+## A 60-second tour from the agent's POV
+
+Imagine an agent in a fresh Claude Code session with eight MCP servers configured. Without the librarian:
+
+```
+agent thinks: I need to send a Slack message. What tools does Slack have?
+agent calls: slack.send_message → schema error, missing required `channel_id`
+agent calls: slack.list_channels → ok, picks one
+agent calls: slack.send_message with channel name → fails, channels need IDs
+agent: gives up or wastes 2000 tokens loading every Slack schema in full
+```
+
+With the librarian:
+
+```
+agent calls: librarian_list()
+  → 8 servers grouped by category, one-line summary each
+agent calls: librarian_help("slack")
+  → category breakdown, workflows ("post a threaded reply", "resolve names before acting"),
+    gotchas ("channel IDs ≠ channel names"), all in <1 KB
+agent calls: slack.list_channels then slack.send_message correctly first try
+```
+
+This is **the entire value proposition**. Everything else (manifest authoring, notes, fetch_docs, propose/commit gates) is supporting infrastructure to make sure that experience stays accurate as servers and your knowledge of them evolve.
 
 ## Install
+
+```powershell
+# from source
+cargo build --release
+.\target\release\mcp-librarian.exe --help
+```
+
+Or install globally:
 
 ```powershell
 cargo install --path .
 ```
 
-Or build locally:
+The result is one self-contained ~12 MB binary. No runtime dependencies, no Node, no Python.
 
-```powershell
-cargo build --release
-.\target\release\mcp-librarian.exe --help
-```
+## Configure (add to your MCP client)
 
-## Configure
+### Claude Code (`~/.claude.json` on every platform)
 
-Add it to your Claude Code MCP config (`~/.claude.json` on Windows: `C:\Users\<you>\.claude.json`):
-
-```json
+```jsonc
 {
   "mcpServers": {
     "librarian": {
@@ -64,44 +160,59 @@ Add it to your Claude Code MCP config (`~/.claude.json` on Windows: `C:\Users\<y
 }
 ```
 
-Then in a Claude Code session: `librarian_list()` to see what it found, `librarian_refresh()` once to probe schemas.
+### Claude Desktop (`%APPDATA%\Claude\claude_desktop_config.json`)
 
-### Paths
+Same shape. Use the full path to the binary.
 
-Resolved via the [`directories`](https://docs.rs/directories) crate. On Windows:
+### Codex (or any other MCP client)
 
-- Cache: `%LOCALAPPDATA%\netviper\mcp-librarian\cache\index.json`
-- Config (manifests): `%APPDATA%\netviper\mcp-librarian\config\manifests\<server>.toml`
-- Learned notes: `%LOCALAPPDATA%\netviper\mcp-librarian\data\learned\<server>.jsonl`
+The MCP transport is plain stdio. Add an entry pointing `command` at the binary with `args: ["serve"]` and you're in.
 
-macOS/Linux paths follow the same crate's conventions but are marked `TODO: verify` in the source — I'm on Windows; patches welcome.
-
-### Environment overrides
-
-- `MCP_LIBRARIAN_CONFIG` — point at a JSON file with an `{ "mcpServers": { ... } }` block, used in addition to the standard locations. Useful for tests and non-standard setups.
-- `RUST_LOG` — standard `tracing_subscriber` filter; defaults to `warn,mcp_librarian=info`.
-
-## CLI
+After configuring, restart your MCP client. Then in a session:
 
 ```
-mcp-librarian serve                # MCP server on stdio (the mode Claude Code uses)
-mcp-librarian list [--category X]  # print the list as markdown
-mcp-librarian print <server> [--topic T]
-mcp-librarian refresh [--server X] # reprobe schemas
-mcp-librarian compact <server>     # stub: will compact learned/<server>.jsonl, not yet implemented
+librarian_list()       # see what librarian found
+librarian_refresh()    # probe every stdio server once to populate the index
 ```
 
-## Manifest format
+You'll see your other servers populate immediately. Schemas come in after the first `librarian_refresh`.
 
-`<config>/manifests/<server>.toml`:
+## The ten tools
+
+| Tool | What it does |
+|---|---|
+| `librarian_list` | Directory of all known MCP servers, grouped by category. Optional `category` filter. |
+| `librarian_help` | Playbook for one server. No `topic` = overview; with `topic` = drill-down. `server="librarian"` returns the librarian's own playbook. `topic="manifest_schema"` returns the TOML reference. |
+| `librarian_search` | Fuzzy-match across every known tool's name + description. Stop-word filtered. |
+| `librarian_note` | Agent appends an observation about a server's behavior. Soft-dedup at write time on (server, tool, kind, normalized claim). `allow_duplicate=true` to bypass. |
+| `librarian_seed_playbook` | Bootstrap a server entry from the tool list the agent already sees in its deferred-tools reminder. The way to register hosted/cloud servers. |
+| `librarian_refresh` | Reprobe local stdio servers. Flags notes whose schemas drifted. |
+| `librarian_manifest_write` | Author or replace a manifest. Two-step propose/commit gate: first call returns a structured preview + a single-use token; second call with that token + the same content (content-fingerprinted) commits. |
+| `librarian_manifest_diff` | Show what changed between current and the auto-backup. Read-only. mtime-labeled to disambiguate post-restore direction. |
+| `librarian_manifest_restore` | Swap current ↔ backup. Two-step propose/commit gate. Reversible: a second restore undoes the first. |
+| `librarian_fetch_docs` | Fetch public documentation pages (HTTP/HTTPS only, SSRF-guarded, 5 MiB response cap, 7-day cache) for bootstrapping a manifest from vendor docs. |
+
+For the agent-facing version of this with workflows and gotchas, call `librarian_help("librarian")` — that's the librarian's own playbook.
+
+## Manifests — your canonical playbooks
+
+A manifest is a single TOML file at `<config>/manifests/<server>.toml`. Five sections, all optional:
 
 ```toml
+# Root-level (must come BEFORE any [section] header — TOML grammar requirement)
+gotchas = [
+    "Channel IDs are not the same as channel names — resolve via chat_search first.",
+    "Bots cannot post in channels they haven't been invited to.",
+]
+
+# Top-level summary, used in librarian_list
 [meta]
 category = "comms"
 summary  = "Team chat — channels, threads, reactions."
 # paired_cli = "team-chat-cli"  # optional, future use
 
-# Optional manually-curated tool groupings (overrides auto-prefix grouping)
+# Manually-curated tool groupings (overrides the auto-prefix grouping
+# the librarian falls back to when no categories are defined)
 [[tool_categories]]
 name  = "Read"
 tools = ["chat_read_channel", "chat_read_thread", "chat_search"]
@@ -118,7 +229,7 @@ body  = """
 2. chat_send_message with `thread_ts` set to the parent's `ts`
 """
 
-# Drill-down topics
+# Drill-down topics — accessible via librarian_help(server, topic=name)
 [[topics]]
 name  = "rate_limits"
 title = "Rate limits & retry semantics"
@@ -126,17 +237,102 @@ body  = """
 Posting is gated at ~1 message per second per channel.
 On 429, back off for the value of the Retry-After header.
 """
-
-# Surprising behaviors that would trip up future agents
-gotchas = [
-  "Channel IDs are not the same as channel names — resolve via chat_search first",
-  "Bots cannot post in channels they haven't been invited to",
-]
 ```
+
+For the full schema reference (every field documented, plus the TOML grammar trap with root keys vs sections), have the agent call:
+
+```
+librarian_help("librarian", topic="manifest_schema")
+```
+
+That's how the librarian explains its own format — the answer to "how do I structure this?" is one tool call away.
+
+## Workflow recipes
+
+Three patterns cover most of how I use the librarian day-to-day.
+
+### 1. Cold orientation (the canonical agent flow)
+
+```
+agent calls librarian_list()                # 1 call, full landscape
+agent identifies the server it needs
+agent calls librarian_help(server)          # workflows + categories + gotchas
+agent calls librarian_help(server, topic)   # drill into a specific workflow if needed
+agent calls the actual tool from that server, correctly first try
+```
+
+### 2. Bootstrapping a hosted/cloud server (e.g. Notion, Slack-claude-mediated, Figma)
+
+The librarian can't probe these by spawning. You bootstrap a manifest from vendor docs:
+
+```
+1. agent calls librarian_fetch_docs(url="https://docs.vendor.com/mcp",
+                                    extra_urls=["https://docs.vendor.com/mcp/auth"])
+   → cleaned text from the docs (HTML stripped, 5 MiB cap, public hosts only)
+2. agent synthesizes a Manifest in TOML based on what it read
+3. agent calls librarian_manifest_write(server="vendor",
+                                        manifest_toml="<toml string>")
+   → returns a structured preview + a confirm_token
+4. You read the preview. You type "I agree" / "yes".
+5. agent calls librarian_manifest_write(...same content..., confirm_token="...")
+   → commits to disk. Future sessions see it via librarian_list.
+```
+
+The propose/commit gate is **code-enforced**, not social-rule. The token is single-use, expires in 5 minutes, and is fingerprinted to the exact manifest content — committing a different shape rejects.
+
+### 3. Filing what an agent learned
+
+When an agent discovers a non-obvious behavior, it files a note:
+
+```
+librarian_note(
+    server="slack",
+    tool="chat_send_message",
+    kind="behavior",              # or workflow / arg_shape / error_pattern / tip / example
+    basis="observed",             # or "inferred" — renders weaker
+    claim="Posting to a channel the bot hasn't been invited to silently no-ops, no error.",
+    tags=["permissions", "footgun"]
+)
+```
+
+Next session's `librarian_help("slack")` shows this note under Gotchas, dated. If a future `librarian_refresh` detects the underlying `chat_send_message` schema changed, the note gets flagged `⚠possibly stale`.
+
+Dedup at write time prevents the same observation from accumulating across sessions; `allow_duplicate=true` is the escape hatch for intentional re-emphasis.
+
+## Storage paths
+
+Resolved via the [`directories`](https://docs.rs/directories) crate. On Windows:
+
+- Cache: `%LOCALAPPDATA%\netviper\mcp-librarian\cache\index.json`
+- Doc cache: `%LOCALAPPDATA%\netviper\mcp-librarian\cache\docs\<hash>.json`
+- Manifests: `%APPDATA%\netviper\mcp-librarian\config\manifests\<server>.toml` (+ `.bak`)
+- Lock: `%APPDATA%\netviper\mcp-librarian\config\.librarian.lock`
+- Learned notes: `%LOCALAPPDATA%\netviper\mcp-librarian\data\learned\<server>.jsonl`
+
+macOS/Linux paths follow the same crate's conventions but are marked `TODO: verify` in the source — I'm on Windows; patches welcome.
+
+## Environment & CLI
+
+### Environment overrides
+
+- `MCP_LIBRARIAN_CONFIG` — point at a JSON file with an `{ "mcpServers": { ... } }` block, used in addition to the standard locations. Useful for tests and non-standard setups.
+- `RUST_LOG` — standard `tracing_subscriber` filter; defaults to `warn,mcp_librarian=info`.
+
+### CLI
+
+```
+mcp-librarian serve                # MCP server on stdio (the mode clients use)
+mcp-librarian list [--category X]  # print the list as markdown
+mcp-librarian print <server> [--topic T]
+mcp-librarian refresh [--server X] # reprobe schemas
+mcp-librarian compact <server>     # stub: will compact learned/<server>.jsonl, not yet implemented
+```
+
+The non-`serve` subcommands are for local inspection — quick "what does this look like?" without going through an MCP client.
 
 ## Security & storage
 
-**What the librarian stores on disk** (paths under [Paths](#paths)):
+**What the librarian stores on disk** (paths above):
 
 - `cache/index.json` — probed tool names + descriptions. No values.
 - `config/manifests/<server>.toml` — your hand-authored playbooks. Plain TOML.
@@ -166,18 +362,19 @@ Response bodies are capped at 5 MiB to prevent OOM.
 
 **Server-name validation.** The `server` argument in every tool that takes one is validated to `[A-Za-z0-9_.-]+` with no leading dot, preventing path-traversal writes via names like `../../foo`.
 
+**Propose/commit gates.** Every write tool (`librarian_manifest_write`, `librarian_manifest_restore`) requires a two-step dance: the propose call returns a structured preview + a single-use token; the commit call must include that token AND the same content (fingerprinted). Tokens expire in 5 minutes. This is the code-rule that prevents an agent from auto-committing destructive changes — designed for the worst-case AI, not the best.
+
 ## Known limitations
 
 - **Windows-first.** macOS/Linux paths exist but I haven't verified them. Patches welcome.
-- **Local stdio probing only.** Remote/cloud MCP servers (the `claude.ai_*` family) can't be probed by spawning. Use `librarian_seed_playbook` to bootstrap them from the tool list the agent already sees in its context.
+- **Local stdio probing only.** Remote/cloud MCP servers (the `claude.ai_*` family) can't be probed by spawning. Use `librarian_seed_playbook` or `librarian_fetch_docs` + `librarian_manifest_write` to bootstrap them from the tool list the agent already sees or from vendor docs.
 - **No CLI playbook recursion.** Paired-CLI detection is manifest-driven; the recursive `--help` walker is a future feature.
-- **No compaction of learned notes.** Files grow append-only. `mcp-librarian compact <server>` is a stub.
-- **No PII scrubbing.** Convention: `claim` is prose, not literal arg blobs. No customer data in, no customer data out.
+- **No compaction of learned notes.** Files grow append-only. `mcp-librarian compact <server>` is a stub. Dedup-at-write-time substantially limits growth in practice.
+- **No PII scrubbing.** Convention: `claim` is prose, not literal arg blobs.
+- **Single-host only.** No clustering, no shared state across machines. Each machine has its own librarian state.
 
-## Licenses
+## Licenses & contributing
 
 Dual-licensed under [MIT](LICENSE-MIT) and [Apache-2.0](LICENSE-APACHE). Pick whichever fits.
-
-## Contributing
 
 Patches welcome. Feature requests without patches will be politely declined — this is a personal tool, OSS'd because someone else might want it. Open an issue if you want to discuss before sending a PR.
