@@ -178,6 +178,32 @@ fn render_list_groups_by_category() {
 }
 
 #[test]
+fn render_list_uses_entry_category_when_no_manifest() {
+    // Seeded entries set ServerEntry.category but have no manifest yet.
+    // Without the entry.category fallback, they would all bucket into
+    // "uncategorized" — silent regression we hit in the real index.
+    let mut entry = fake_entry("claude.ai_Slack", vec![]);
+    entry.category = Some("comms".into());
+    let pairs = vec![(entry, None)];
+    let out = playbook::render_list(&pairs, None);
+    assert!(out.contains("## comms"), "should bucket under comms, got: {out}");
+    assert!(!out.contains("## uncategorized"));
+}
+
+#[test]
+fn render_list_manifest_category_beats_entry_category() {
+    // When both exist, the manifest's category wins (authored canon).
+    let mut entry = fake_entry("foo", vec![]);
+    entry.category = Some("from-entry".into());
+    let mut manifest = Manifest::default();
+    manifest.meta.category = Some("from-manifest".into());
+    let pairs = vec![(entry, Some(manifest))];
+    let out = playbook::render_list(&pairs, None);
+    assert!(out.contains("## from-manifest"));
+    assert!(!out.contains("## from-entry"));
+}
+
+#[test]
 fn render_list_filters_by_category() {
     let mut a = Manifest::default();
     a.meta.category = Some("knowledge".into());
