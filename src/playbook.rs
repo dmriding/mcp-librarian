@@ -677,7 +677,8 @@ pub fn render_self() -> String {
     s.push_str("- **Read**: librarian_list, librarian_help, librarian_search, librarian_manifest_diff\n");
     s.push_str("- **Write**: librarian_note, librarian_seed_playbook, librarian_manifest_write, librarian_manifest_restore\n");
     s.push_str("- **Fetch**: librarian_fetch_docs (read public vendor docs to bootstrap hosted-server playbooks)\n");
-    s.push_str("- **Maintenance**: librarian_refresh\n\n");
+    s.push_str("- **Maintenance**: librarian_refresh\n");
+    s.push_str("- **Bootstrap**: librarian_onboarding (one-shot prompt for first-install setup)\n\n");
     s.push_str("## Key Workflows\n\n");
     s.push_str("### First-call orientation\n");
     s.push_str("1. `librarian_list()` — landscape of all servers, grouped by category\n");
@@ -727,6 +728,99 @@ pub fn render_self() -> String {
          (field names, nesting, the root-keys-before-sections trap, a minimal working example)\n",
     );
     s.push_str("\nCall `librarian_help(\"librarian\", topic)` to drill in.\n");
+    s
+}
+
+/// Render the onboarding prompt returned by `librarian_onboarding`. The output
+/// is itself a prompt: the agent reads it and performs the actions described
+/// (refresh, then enumerate hosted servers from its deferred-tools reminder
+/// and call seed_playbook for each). Static content — no per-call state.
+pub fn render_onboarding() -> String {
+    let mut s = String::new();
+    s.push_str("# librarian onboarding — index every MCP server you can see\n\n");
+    s.push_str(
+        "You're a fresh agent. This is a one-time bootstrap that populates the librarian \
+         index with every MCP server connected to this client. After this, future sessions \
+         can hit `librarian_list()` once and see the whole landscape.\n\n",
+    );
+
+    s.push_str("## Step 1 — auto-discover local stdio servers\n\n");
+    s.push_str(
+        "Local stdio servers (the ones in `~/.claude.json` or `claude_desktop_config.json`) \
+         can be spawned and probed. One call indexes all of them:\n\n",
+    );
+    s.push_str("```\nlibrarian_refresh()\n```\n\n");
+    s.push_str(
+        "This reads your MCP client config, spawns each stdio server briefly, asks for its \
+         tool list, and persists schemas to the index.\n\n",
+    );
+
+    s.push_str("## Step 2 — see what's still missing\n\n");
+    s.push_str(
+        "```\nlibrarian_list()\n```\n\n\
+         Compare the result against the MCP servers you can see in your own context (look at \
+         the deferred-tools reminder — tools like `mcp__claude_ai_*`, `mcp__SomeServer__*`, etc.). \
+         Anything visible to you but NOT in the list is a hosted/cloud server the librarian can't \
+         probe by spawning — those need manual seeding.\n\n",
+    );
+
+    s.push_str("## Step 3 — seed each missing hosted server\n\n");
+    s.push_str(
+        "For every hosted/cloud MCP server visible in your deferred-tools reminder that didn't \
+         show up in `librarian_list`, call:\n\n",
+    );
+    s.push_str("```\nlibrarian_seed_playbook(\n");
+    s.push_str("    server=\"<the exact name as it appears in tool prefixes, e.g. claude.ai_Slack>\",\n");
+    s.push_str("    summary=\"<one-sentence description of what this server does>\",\n");
+    s.push_str("    category=\"<bucket: comms | design | productivity | knowledge | crm |\n");
+    s.push_str("               prospecting | storage | developer-tools | meta | data | utility>\",\n");
+    s.push_str("    tools=[\n");
+    s.push_str("        {\"name\": \"tool_name_1\", \"description\": \"one-line summary\"},\n");
+    s.push_str("        {\"name\": \"tool_name_2\", \"description\": \"...\"},\n");
+    s.push_str("        ...\n");
+    s.push_str("    ]\n");
+    s.push_str(")\n```\n\n");
+
+    s.push_str("### Conventions\n\n");
+    s.push_str(
+        "- **Server name**: use the name AS IT APPEARS in your tool prefixes. \
+         `mcp__claude_ai_Slack__slack_send_message` → server is `claude.ai_Slack`. \
+         If the prefix is something like `mcp__Foo__bar`, the server is `Foo`.\n",
+    );
+    s.push_str(
+        "- **Skip duplicates**: if a server appears both as stdio (already in `librarian_list`) \
+         AND as a hosted variant, seed only the hosted one IF its tools genuinely differ. \
+         Otherwise skip — the stdio entry already has real probed schemas.\n",
+    );
+    s.push_str(
+        "- **Tool descriptions** are optional but improve `librarian_search` quality. One sentence \
+         each, copied or paraphrased from the tool's own description.\n",
+    );
+    s.push_str(
+        "- **`required` and `properties`** on each tool are optional. Names alone are enough \
+         to make the server appear in `librarian_help` and `librarian_search`.\n\n",
+    );
+
+    s.push_str("## Step 4 — verify\n\n");
+    s.push_str(
+        "```\nlibrarian_list()\n```\n\n\
+         Every connected MCP should now appear under the right category. Show the result to the \
+         user as confirmation.\n\n",
+    );
+
+    s.push_str("## Optional — author full manifests for high-value servers\n\n");
+    s.push_str(
+        "Seeded entries have names, summaries, and tool lists, but no workflows, gotchas, or \
+         topic drill-downs. For the 2–3 servers you'll use most, follow up with:\n\n",
+    );
+    s.push_str(
+        "1. `librarian_fetch_docs(url=\"<vendor's MCP/API docs URL>\")` to pull cleaned vendor docs\n\
+         2. Synthesize a manifest (see `librarian_help(\"librarian\", \"manifest_schema\")` for the TOML reference)\n\
+         3. `librarian_manifest_write(server, manifest_toml=\"...\")` — propose (user reviews) → commit\n\n\
+         A curated manifest beats a seeded entry: it surfaces workflows like \"resolve channel ID before posting\" \
+         and gotchas like \"bot must be invited to the channel first\" that turn into instant context for every future session.\n",
+    );
+
     s
 }
 

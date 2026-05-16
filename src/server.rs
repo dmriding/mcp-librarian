@@ -98,6 +98,9 @@ pub struct ListParams {
     pub category: Option<String>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema, Default)]
+pub struct OnboardingParams {}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct HelpParams {
     /// Server name. Use `"librarian"` for the librarian's own playbook.
@@ -238,6 +241,21 @@ impl LibrarianServer {
     )]
     async fn list(&self, Parameters(p): Parameters<ListParams>) -> Result<String, ErrorData> {
         self.list_inner(p).map_err(internal)
+    }
+
+    #[tool(
+        name = "librarian_onboarding",
+        description = "Return a step-by-step bootstrap prompt for indexing every MCP server connected to this client. \
+                       Call this once on first install: it tells the agent how to combine \
+                       `librarian_refresh` (auto-discovers local stdio servers) with `librarian_seed_playbook` \
+                       (manually-registers hosted/cloud servers visible only in the deferred-tools reminder). \
+                       Output is a prompt — the agent reads it and performs the actions described."
+    )]
+    async fn onboarding(
+        &self,
+        Parameters(_): Parameters<OnboardingParams>,
+    ) -> Result<String, ErrorData> {
+        Ok(playbook::render_onboarding())
     }
 
     #[tool(
