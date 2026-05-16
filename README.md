@@ -6,16 +6,20 @@ I built this for me. Patches welcome; feature requests without patches will be p
 
 ## What it does
 
-A single Rust MCP server exposing six tools to the agent:
+A single Rust MCP server exposing ten tools to the agent:
 
 | Tool | What it does |
 |---|---|
 | `librarian_list` | Directory of all known MCP servers, grouped by category |
-| `librarian_help` | Playbook for one server. No `topic` = overview; with `topic` = drill-down |
+| `librarian_help` | Playbook for one server. No `topic` = overview; with `topic` = drill-down. `server="librarian"` returns the librarian's own playbook; `topic="manifest_schema"` returns the TOML reference |
 | `librarian_search` | Fuzzy-match across every known tool's name + description |
-| `librarian_note` | Agent appends an observation about a server's behavior |
+| `librarian_note` | Agent appends an observation about a server's behavior. Soft-dedup at write time; `allow_duplicate=true` to bypass |
 | `librarian_seed_playbook` | Bootstrap a server entry from the tool list the agent already sees |
 | `librarian_refresh` | Reprobe local stdio servers; flag notes whose schemas drifted |
+| `librarian_manifest_write` | Author or replace a manifest. Two-step propose/commit gate with a single-use token |
+| `librarian_manifest_diff` | Show what changed between current and the auto-backup |
+| `librarian_manifest_restore` | Swap current ↔ backup. Two-step propose/commit gate |
+| `librarian_fetch_docs` | Fetch public documentation pages (HTTP/HTTPS only, SSRF-guarded) for bootstrapping a manifest from vendor docs |
 
 The agent's discovery cost collapses from N tool schemas to one call returning prose.
 
@@ -129,6 +133,38 @@ gotchas = [
   "Bots cannot post in channels they haven't been invited to",
 ]
 ```
+
+## Security & storage
+
+**What the librarian stores on disk** (paths under [Paths](#paths)):
+
+- `cache/index.json` — probed tool names + descriptions. No values.
+- `config/manifests/<server>.toml` — your hand-authored playbooks. Plain TOML.
+- `config/manifests/<server>.toml.bak` — one-step backup written before every commit.
+- `data/learned/<server>.jsonl` — agent-appended observations. Prose claims plus `kind` / `basis` metadata.
+- `cache/docs/<hash>.json` — cached responses from `librarian_fetch_docs` (7-day TTL).
+
+**What it doesn't store.** No API keys, tokens, or session credentials. Those live in your MCP client config (`.claude.json`, `claude_desktop_config.json`) and are passed to spawned servers as env vars; the librarian never reads them. Convention for `librarian_note` claims: prose, not literal arg blobs.
+
+**Why no app-level encryption.** The data above isn't sensitive (playbooks, references to env-var *names*, public-docs cache). Any reversible scheme would need its key on disk next to the file — that's obfuscation, not security. If you want at-rest protection, BitLocker / FileVault / dm-crypt at the volume level is the right tool, not application-level.
+
+**Don't sync `%APPDATA%\netviper\` to a less-trusted location** (OneDrive Personal, etc.) — manifests and notes go with it. The directory is created with whatever ACLs your `%APPDATA%` inherits, which is usually user-only.
+
+**Concurrency.** If you run multiple MCP clients (e.g. Claude Code + Codex) simultaneously, each spawns its own librarian process sharing the same files. Cross-process writes are serialized via an advisory file lock at `config/.librarian.lock`. Manifest writes use write-temp-then-rename so readers always see fully-old or fully-new content. The lock is held briefly (sub-ms per write) and never during long operations like probing.
+
+**SSRF guards on `librarian_fetch_docs`.** Rejects:
+
+- Non-`http(s)` schemes (`file://`, `ftp://`, etc.)
+- IP literals in loopback / private / link-local / multicast / CGNAT / IPv6 unique-local / IPv6 link-local ranges, plus IPv4-mapped equivalents
+- `localhost` and aliases as hostnames
+- Hostnames that DNS-resolve into any of the above
+- Redirects to any of the above (re-validated per hop, max 5 hops)
+
+Response bodies are capped at 5 MiB to prevent OOM.
+
+**Known SSRF limitation.** DNS rebinding (a domain that returns a public IP during our resolve check but a private IP for reqwest's actual dial) is not mitigated — would require IP-pinning that reqwest doesn't expose cleanly. For the realistic threat model (agent hallucinates or is prompt-injected with a localhost / metadata URL), the existing guards cover it.
+
+**Server-name validation.** The `server` argument in every tool that takes one is validated to `[A-Za-z0-9_.-]+` with no leading dot, preventing path-traversal writes via names like `../../foo`.
 
 ## Known limitations
 
