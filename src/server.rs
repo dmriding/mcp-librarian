@@ -18,6 +18,7 @@ use crate::fetch::{self, FetchState};
 use crate::index::{
     self, ArgSummary, Index, IndexedTool, Note, NoteBasis, NoteKind, ProbeStatus, ServerEntry,
 };
+use crate::lockfile;
 use crate::playbook::{self, Manifest};
 use crate::probe;
 
@@ -173,7 +174,7 @@ pub struct RefreshParams {
     pub server: Option<String>,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct ManifestWriteParams {
     /// Server name the manifest applies to (must match the name in your MCP config).
     pub server: String,
@@ -540,59 +541,66 @@ impl LibrarianServer {
     }
 
     fn note_inner(&self, p: NoteParams) -> Result<String> {
-        // Dedup gate: by default reject a note that's equivalent to an existing
-        // one (same server, tool, kind, normalized claim). This is the cheapest
-        // way to keep playbooks from accumulating near-duplicates as fresh
-        // sessions re-discover known facts. `allow_duplicate=true` is the
-        // escape hatch for intentional re-emphasis.
-        if !p.allow_duplicate {
-            let existing = index::read_notes(&self.paths, &p.server).unwrap_or_default();
-            let new_norm = normalize_claim(&p.claim);
-            if let Some(dup) = existing.iter().find(|n| {
-                n.tool == p.tool
-                    && n.kind == p.kind
-                    && normalize_claim(&n.claim) == new_norm
-            }) {
-                let tool_clause = p
-                    .tool
-                    .as_deref()
-                    .map(|t| format!(" / `{t}`"))
-                    .unwrap_or_default();
-                let existing_preview: String = if dup.claim.chars().count() > 120 {
-                    let mut s: String = dup.claim.chars().take(120).collect();
-                    s.push('…');
-                    s
-                } else {
-                    dup.claim.clone()
-                };
-                anyhow::bail!(
-                    "Error: duplicate note. An equivalent note already exists for `{}`{} (kind: {:?}) \
-                     filed at {}. Existing claim: \"{}\". \
-                     Action: if your new note adds genuinely different content, rephrase it. \
-                     If you want to record this observation anyway (e.g. recency bump or strong \
-                     re-confirmation), re-call with `allow_duplicate=true`.",
-                    p.server,
-                    tool_clause,
-                    p.kind,
-                    dup.timestamp.format("%Y-%m-%d %H:%M UTC"),
-                    existing_preview,
-                );
+        // The read-check-write sequence below MUST be atomic across processes,
+        // or two clients writing the same observation concurrently can both
+        // pass the dedup check before either commits and produce duplicates —
+        // the exact pollution dedup was added to prevent.
+        let note = lockfile::with_write_lock(&self.paths, || {
+            // Dedup gate: by default reject a note that's equivalent to an existing
+            // one (same server, tool, kind, normalized claim). This is the cheapest
+            // way to keep playbooks from accumulating near-duplicates as fresh
+            // sessions re-discover known facts. `allow_duplicate=true` is the
+            // escape hatch for intentional re-emphasis.
+            if !p.allow_duplicate {
+                let existing = index::read_notes(&self.paths, &p.server).unwrap_or_default();
+                let new_norm = normalize_claim(&p.claim);
+                if let Some(dup) = existing.iter().find(|n| {
+                    n.tool == p.tool
+                        && n.kind == p.kind
+                        && normalize_claim(&n.claim) == new_norm
+                }) {
+                    let tool_clause = p
+                        .tool
+                        .as_deref()
+                        .map(|t| format!(" / `{t}`"))
+                        .unwrap_or_default();
+                    let existing_preview: String = if dup.claim.chars().count() > 120 {
+                        let mut s: String = dup.claim.chars().take(120).collect();
+                        s.push('…');
+                        s
+                    } else {
+                        dup.claim.clone()
+                    };
+                    anyhow::bail!(
+                        "Error: duplicate note. An equivalent note already exists for `{}`{} (kind: {:?}) \
+                         filed at {}. Existing claim: \"{}\". \
+                         Action: if your new note adds genuinely different content, rephrase it. \
+                         If you want to record this observation anyway (e.g. recency bump or strong \
+                         re-confirmation), re-call with `allow_duplicate=true`.",
+                        p.server,
+                        tool_clause,
+                        p.kind,
+                        dup.timestamp.format("%Y-%m-%d %H:%M UTC"),
+                        existing_preview,
+                    );
+                }
             }
-        }
 
-        let note = Note {
-            timestamp: Utc::now(),
-            session_id: None, // could be threaded from a future request meta
-            server: p.server.clone(),
-            tool: p.tool,
-            topic: p.topic,
-            kind: p.kind,
-            basis: p.basis,
-            claim: p.claim,
-            tags: p.tags,
-            possibly_stale: false,
-        };
-        index::append_note(&self.paths, &note)?;
+            let note = Note {
+                timestamp: Utc::now(),
+                session_id: None, // could be threaded from a future request meta
+                server: p.server.clone(),
+                tool: p.tool.clone(),
+                topic: p.topic.clone(),
+                kind: p.kind.clone(),
+                basis: p.basis.clone(),
+                claim: p.claim.clone(),
+                tags: p.tags.clone(),
+                possibly_stale: false,
+            };
+            index::append_note(&self.paths, &note)?;
+            Ok(note)
+        })?;
         // Echo a preview of what was stored so the agent can verify the
         // recorded value matches its intent — guards against silent
         // misrecording (e.g. unexpected defaults at the client layer).
@@ -610,9 +618,9 @@ impl LibrarianServer {
     }
 
     fn seed_inner(&self, p: SeedParams) -> Result<String> {
-        let mut index = Index::load(&self.paths.cache_file)?;
         let now = Utc::now();
         let tool_count = p.tools.len();
+        let server_name = p.server.clone();
         let tools: Vec<IndexedTool> = p
             .tools
             .into_iter()
@@ -630,7 +638,7 @@ impl LibrarianServer {
             })
             .collect();
         let entry = ServerEntry {
-            name: p.server.clone(),
+            name: server_name.clone(),
             transport_descriptor: "seeded by agent".to_string(),
             probeable: false,
             probe_status: ProbeStatus::Seeded,
@@ -639,15 +647,24 @@ impl LibrarianServer {
             summary: p.summary,
             category: p.category,
         };
-        index.servers.insert(p.server.clone(), entry);
-        index.save(&self.paths.cache_file)?;
-        Ok(format!("seeded `{}` with {tool_count} tools", p.server))
+
+        // Lock around load-modify-save so a concurrent seed/refresh doesn't
+        // produce a lost update.
+        lockfile::with_write_lock(&self.paths, || {
+            let mut index = Index::load(&self.paths.cache_file)?;
+            index.servers.insert(server_name.clone(), entry);
+            index.save(&self.paths.cache_file)?;
+            Ok(())
+        })?;
+        Ok(format!("seeded `{}` with {tool_count} tools", server_name))
     }
 
     async fn refresh_inner(&self, p: RefreshParams) -> Result<String> {
         let configs = discovery::discover()?;
-        let mut index = Index::load(&self.paths.cache_file)?;
-        let prior = index.clone();
+        // Snapshot the prior index *before* probing for drift detection. We
+        // don't hold the lock during probe (it can take seconds per server)
+        // — we re-load and merge under the lock once probing completes.
+        let prior = Index::load(&self.paths.cache_file)?;
 
         let to_probe: Vec<_> = match &p.server {
             Some(name) => configs.into_iter().filter(|c| &c.name == name).collect(),
@@ -664,62 +681,73 @@ impl LibrarianServer {
             );
         }
 
-        let mut probed_count = 0;
-        let mut failed_count = 0;
-        let mut remote_count = 0;
-        let mut drifted: Vec<(String, Vec<String>)> = Vec::new();
+        let probed_entries = probe::probe_all(&to_probe).await;
 
-        for entry in probe::probe_all(&to_probe).await {
-            // Drift detection vs prior index entry
-            if let Some(old) = prior.servers.get(&entry.name) {
-                let mut drifted_tools = Vec::new();
-                for new_tool in &entry.tools {
-                    if let Some(old_tool) =
-                        old.tools.iter().find(|t| t.name == new_tool.name)
-                        && Index::arg_shape_drifted(&old_tool.arg_summary, &new_tool.arg_summary)
-                    {
-                        drifted_tools.push(new_tool.name.clone());
+        // Now under the lock: re-load index (catch any concurrent writes),
+        // apply our probe results, compute drift, persist notes + index. The
+        // re-load means another process's seed/refresh that happened during
+        // our probe isn't lost.
+        let (probed_count, failed_count, remote_count, drift_note_total, drifted_servers) =
+            lockfile::with_write_lock(&self.paths, || {
+                let mut index = Index::load(&self.paths.cache_file)?;
+                let mut probed_count = 0;
+                let mut failed_count = 0;
+                let mut remote_count = 0;
+                let mut drifted: Vec<(String, Vec<String>)> = Vec::new();
+
+                for entry in probed_entries {
+                    if let Some(old) = prior.servers.get(&entry.name) {
+                        let mut drifted_tools = Vec::new();
+                        for new_tool in &entry.tools {
+                            if let Some(old_tool) =
+                                old.tools.iter().find(|t| t.name == new_tool.name)
+                                && Index::arg_shape_drifted(
+                                    &old_tool.arg_summary,
+                                    &new_tool.arg_summary,
+                                )
+                            {
+                                drifted_tools.push(new_tool.name.clone());
+                            }
+                        }
+                        if !drifted_tools.is_empty() {
+                            drifted.push((entry.name.clone(), drifted_tools));
+                        }
+                    }
+
+                    match &entry.probe_status {
+                        ProbeStatus::Ok => probed_count += 1,
+                        ProbeStatus::NotProbeable => remote_count += 1,
+                        _ => failed_count += 1,
+                    }
+                    index.servers.insert(entry.name.clone(), entry);
+                }
+
+                let mut drift_note_total = 0;
+                for (server, drifted_tools) in &drifted {
+                    let mut notes = index::read_notes(&self.paths, server)?;
+                    let mut changed = 0;
+                    for note in notes.iter_mut() {
+                        if let Some(tool) = &note.tool
+                            && drifted_tools.contains(tool)
+                            && !note.possibly_stale
+                        {
+                            note.possibly_stale = true;
+                            changed += 1;
+                        }
+                    }
+                    if changed > 0 {
+                        index::write_notes(&self.paths, server, &notes)?;
+                        drift_note_total += changed;
                     }
                 }
-                if !drifted_tools.is_empty() {
-                    drifted.push((entry.name.clone(), drifted_tools));
-                }
-            }
 
-            match &entry.probe_status {
-                ProbeStatus::Ok => probed_count += 1,
-                ProbeStatus::NotProbeable => remote_count += 1,
-                _ => failed_count += 1,
-            }
-            index.servers.insert(entry.name.clone(), entry);
-        }
-
-        // Apply drift flags to learned notes
-        let mut drift_note_total = 0;
-        for (server, drifted_tools) in &drifted {
-            let mut notes = index::read_notes(&self.paths, server)?;
-            let mut changed = 0;
-            for note in notes.iter_mut() {
-                if let Some(tool) = &note.tool
-                    && drifted_tools.contains(tool)
-                    && !note.possibly_stale
-                {
-                    note.possibly_stale = true;
-                    changed += 1;
-                }
-            }
-            if changed > 0 {
-                index::write_notes(&self.paths, server, &notes)?;
-                drift_note_total += changed;
-            }
-        }
-
-        index.save(&self.paths.cache_file)?;
+                index.save(&self.paths.cache_file)?;
+                Ok((probed_count, failed_count, remote_count, drift_note_total, drifted.len()))
+            })?;
 
         Ok(format!(
             "refreshed: {probed_count} probed, {failed_count} failed, {remote_count} remote (not probed). \
-             drift flags set on {drift_note_total} notes across {} servers.",
-            drifted.len()
+             drift flags set on {drift_note_total} notes across {drifted_servers} servers.",
         ))
     }
 }
@@ -862,20 +890,23 @@ impl LibrarianServer {
                          user approve the new version."
                     );
                 }
-                // All checks passed. Re-verify existence under the same rules
-                // as propose (paranoia: file could have been created between
-                // propose and commit).
-                if playbook::load_manifest(&self.paths, &p.server)?.is_some()
-                    && !token_overwrite
-                {
-                    anyhow::bail!(
-                        "Error: a manifest for `{}` was created since the propose call, and \
-                         `overwrite=false` on this commit. Action: re-call without `confirm_token` \
-                         and `overwrite=true` to preview the replacement.",
-                        p.server,
-                    );
-                }
-                playbook::write_manifest(&self.paths, &p.server, &manifest)?;
+                // All checks passed. The existence re-check + write must be
+                // atomic across processes — otherwise another writer can create
+                // a manifest between our check and our write, defeating the
+                // overwrite=false guard. Lock-protected.
+                lockfile::with_write_lock(&self.paths, || {
+                    if playbook::load_manifest(&self.paths, &p.server)?.is_some()
+                        && !token_overwrite
+                    {
+                        anyhow::bail!(
+                            "Error: a manifest for `{}` was created since the propose call, and \
+                             `overwrite=false` on this commit. Action: re-call without `confirm_token` \
+                             and `overwrite=true` to preview the replacement.",
+                            p.server,
+                        );
+                    }
+                    playbook::write_manifest(&self.paths, &p.server, &manifest)
+                })?;
                 Ok(format!(
                     "Committed manifest for `{}` → `{}` ({} categor{}, {} workflow{}, {} topic{}, {} gotcha{}).",
                     p.server,
@@ -1038,7 +1069,11 @@ impl LibrarianServer {
                          a restore-specific token."
                     );
                 }
-                playbook::restore_manifest(&self.paths, &p.server)?;
+                // Lock-protected: restore involves a read-then-two-writes
+                // sequence that would interleave badly with a concurrent write.
+                lockfile::with_write_lock(&self.paths, || {
+                    playbook::restore_manifest(&self.paths, &p.server)
+                })?;
                 Ok(format!(
                     "Restored `{}` from backup. The previous current is now the backup, so a \
                      second `librarian_manifest_restore` call will undo this restore.",
@@ -1226,6 +1261,9 @@ fn _ctx_marker(_c: RequestContext<RoleServer>) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::Barrier;
+    use std::thread;
     use tempfile::TempDir;
 
     fn test_paths() -> (TempDir, Paths) {
@@ -1322,6 +1360,158 @@ mod tests {
                 allow_duplicate: false,
             })
             .unwrap();
+    }
+
+    #[test]
+    fn concurrent_dedup_wins_exactly_once() {
+        // Two threads file the same note simultaneously. Without the write
+        // lock, both would read-then-write past the dedup check. With it,
+        // one succeeds first and the other sees the existing note and
+        // rejects. Exactly one Ok, exactly one Err.
+        let (_tmp, paths) = test_paths();
+        let server = Arc::new(LibrarianServer::new(paths.clone()));
+        let barrier = Arc::new(Barrier::new(2));
+
+        let h1 = {
+            let server = server.clone();
+            let barrier = barrier.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                server.note_inner(NoteParams {
+                    server: "demo".into(),
+                    tool: None,
+                    topic: None,
+                    kind: NoteKind::Tip,
+                    basis: NoteBasis::Observed,
+                    claim: "shared observation".into(),
+                    tags: vec![],
+                    allow_duplicate: false,
+                })
+            })
+        };
+        let h2 = {
+            let server = server.clone();
+            let barrier = barrier.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                server.note_inner(NoteParams {
+                    server: "demo".into(),
+                    tool: None,
+                    topic: None,
+                    kind: NoteKind::Tip,
+                    basis: NoteBasis::Observed,
+                    claim: "shared observation".into(),
+                    tags: vec![],
+                    allow_duplicate: false,
+                })
+            })
+        };
+
+        let r1 = h1.join().unwrap();
+        let r2 = h2.join().unwrap();
+        let oks = [&r1, &r2].iter().filter(|r| r.is_ok()).count();
+        let errs = [&r1, &r2].iter().filter(|r| r.is_err()).count();
+        assert_eq!(oks, 1, "exactly one of the concurrent writers should succeed; got r1={r1:?} r2={r2:?}");
+        assert_eq!(errs, 1, "the other should be rejected with a dedup error");
+
+        // Verify only one note actually landed on disk.
+        let notes = index::read_notes(&paths, "demo").unwrap();
+        assert_eq!(notes.len(), 1, "should have exactly one note in storage");
+    }
+
+    #[test]
+    fn concurrent_manifest_writes_serialize() {
+        // Two threads write a manifest for the same server. With the lock,
+        // they serialize: final state matches one of the two writers exactly,
+        // and the backup (if any) is the OTHER writer's content — not a
+        // half-written file.
+        let (_tmp, paths) = test_paths();
+        let server = Arc::new(LibrarianServer::new(paths.clone()));
+        let barrier = Arc::new(Barrier::new(2));
+
+        let make_params = |summary: &str| ManifestWriteParams {
+            server: "demo".into(),
+            manifest_toml: Some(format!(
+                "[meta]\ncategory = \"data\"\nsummary  = \"{summary}\"\n"
+            )),
+            manifest: None,
+            confirm_token: None,
+            overwrite: true,
+        };
+
+        // Pre-create a manifest so both writers go through the overwrite path
+        // (without this they'd hit the overwrite=false error on the propose
+        // before we even get to the lock).
+        crate::playbook::write_manifest(
+            &paths,
+            "demo",
+            &Manifest {
+                meta: crate::playbook::ManifestMeta {
+                    summary: Some("initial".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // Two-stage dance: each thread proposes, then commits with the token.
+        let run = |label: &'static str| {
+            let server = server.clone();
+            let barrier = barrier.clone();
+            let p = make_params(label);
+            thread::spawn(move || -> Result<(String, &'static str), anyhow::Error> {
+                barrier.wait();
+                let propose = server.manifest_write_inner(p.clone())?;
+                // Extract the token from the propose response.
+                let token_line = propose
+                    .lines()
+                    .find(|l| l.contains("confirm_token=\""))
+                    .ok_or_else(|| anyhow::anyhow!("no token in: {propose}"))?;
+                let start = token_line.find("confirm_token=\"").unwrap() + 15;
+                let end = token_line[start..].find('"').unwrap() + start;
+                let token = token_line[start..end].to_string();
+
+                let mut commit = p.clone();
+                commit.confirm_token = Some(token);
+                server.manifest_write_inner(commit).map(|s| (s, label))
+            })
+        };
+
+        let h1 = run("alpha");
+        let h2 = run("beta");
+        let r1 = h1.join().unwrap();
+        let r2 = h2.join().unwrap();
+        assert!(r1.is_ok() && r2.is_ok(), "both writers should commit: r1={r1:?} r2={r2:?}");
+
+        // Final manifest content must match exactly one of the writers
+        // (no half-written or merged state).
+        let final_m = crate::playbook::load_manifest(&paths, "demo").unwrap().unwrap();
+        let summary = final_m.meta.summary.unwrap();
+        assert!(
+            summary == "alpha" || summary == "beta",
+            "final summary should be one of the two writers' values, got: {summary}"
+        );
+    }
+
+    #[test]
+    fn lock_file_is_created_on_first_write() {
+        let (_tmp, paths) = test_paths();
+        let server = LibrarianServer::new(paths.clone());
+        server
+            .note_inner(NoteParams {
+                server: "demo".into(),
+                tool: None,
+                topic: None,
+                kind: NoteKind::Tip,
+                basis: NoteBasis::Observed,
+                claim: "test".into(),
+                tags: vec![],
+                allow_duplicate: false,
+            })
+            .unwrap();
+        let lock_path = crate::lockfile::lock_path_for(&paths);
+        assert!(lock_path.exists(), "lock file should exist at {}", lock_path.display());
     }
 
     #[test]

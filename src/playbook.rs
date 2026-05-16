@@ -943,14 +943,31 @@ pub fn write_manifest(paths: &Paths, server: &str, manifest: &Manifest) -> Resul
     std::fs::create_dir_all(&paths.manifest_dir)?;
     let target = paths.manifest_path(server);
     let backup = paths.manifest_backup_path(server);
+    let tmp = paths.manifest_dir.join(format!("{server}.toml.write-tmp"));
+
+    // Serialize first — a serialization error must not leave a half-written
+    // target on disk.
+    let s = toml::to_string_pretty(manifest)?;
+
     // Always back up the existing manifest first — one step of history is
-    // the safety net for `librarian_manifest_restore`.
+    // the safety net for `librarian_manifest_restore`. Callers must hold the
+    // librarian write lock during this whole sequence (see `lockfile`), so
+    // a concurrent writer can't slip a different "current" between the copy
+    // and the rename below.
     if target.exists() {
         std::fs::copy(&target, &backup)
             .with_context(|| format!("backing up {} to {}", target.display(), backup.display()))?;
     }
-    let s = toml::to_string_pretty(manifest)?;
-    std::fs::write(&target, s).with_context(|| format!("writing {}", target.display()))?;
+
+    // Atomic publish: write the new content to a temp file, then rename onto
+    // the target. `rename` is atomic on every supported OS when source and
+    // destination are on the same filesystem (always true here — same dir),
+    // so readers see either the fully-old content or the fully-new content,
+    // never a partial write.
+    std::fs::write(&tmp, s)
+        .with_context(|| format!("writing temp {}", tmp.display()))?;
+    std::fs::rename(&tmp, &target)
+        .with_context(|| format!("renaming {} into {}", tmp.display(), target.display()))?;
     Ok(())
 }
 
@@ -1030,13 +1047,25 @@ pub fn restore_manifest(paths: &Paths, server: &str) -> Result<()> {
     } else {
         None
     };
-    // Write backup → current
-    std::fs::write(&target, &backup_content)
-        .with_context(|| format!("writing {}", target.display()))?;
-    // Write old current → backup (so a second restore undoes this restore)
+
+    // Atomic swap. Both writes go through a temp + rename so a reader between
+    // them sees either the pre-restore state on both sides or the post-restore
+    // state on both sides, never a half-applied swap. Caller is expected to
+    // hold the librarian write lock so two concurrent restores can't trample
+    // each other's backup either.
+    let target_tmp = paths.manifest_dir.join(format!("{server}.toml.write-tmp"));
+    let backup_tmp = paths.manifest_dir.join(format!("{server}.toml.bak.write-tmp"));
+
+    std::fs::write(&target_tmp, &backup_content)
+        .with_context(|| format!("writing temp {}", target_tmp.display()))?;
+    std::fs::rename(&target_tmp, &target)
+        .with_context(|| format!("renaming {} into {}", target_tmp.display(), target.display()))?;
+
     if let Some(c) = current_content {
-        std::fs::write(&backup, c)
-            .with_context(|| format!("writing {}", backup.display()))?;
+        std::fs::write(&backup_tmp, c)
+            .with_context(|| format!("writing temp {}", backup_tmp.display()))?;
+        std::fs::rename(&backup_tmp, &backup)
+            .with_context(|| format!("renaming {} into {}", backup_tmp.display(), backup.display()))?;
     }
     Ok(())
 }
