@@ -668,7 +668,22 @@ fn group_tools<'a>(
         let prefix = prefix_of(&tool.name);
         groups.entry(prefix).or_default().push(tool);
     }
-    // If everything went into "misc" (e.g. one-token names), keep it.
+
+    // If every tool collapsed into ONE bucket (every tool shares the same first
+    // token — e.g. `notion-*`), recursing one level down often turns that flat
+    // 14-tool list into useful sub-groups (`create`, `update`, `get`, ...).
+    // Only recurse when there's enough payoff: at least 4 tools, the recursion
+    // yields 2+ buckets, and at least one bucket has 2+ tools (otherwise we've
+    // just produced a verbose flat list with weird headers).
+    if groups.len() == 1 && entry.tools.len() >= 4 {
+        let only_prefix = groups.keys().next().cloned().unwrap_or_default();
+        let recursed = recurse_prefix_grouping(&only_prefix, &entry.tools);
+        let useful = recursed.len() >= 2 && recursed.values().any(|v| v.len() >= 2);
+        if useful {
+            return recursed;
+        }
+    }
+
     groups
 }
 
@@ -682,6 +697,33 @@ fn prefix_of(name: &str) -> String {
     } else {
         token.to_string()
     }
+}
+
+/// Group tools by their SECOND prefix token after a known common first prefix.
+/// `claude.ai_Notion` tools all start with `notion-`; recursing yields
+/// `create` (4 tools), `update` (3), `get` (3), `fetch` (1), `search` (1), etc.
+fn recurse_prefix_grouping<'a>(
+    common_prefix: &str,
+    tools: &'a [IndexedTool],
+) -> BTreeMap<String, Vec<&'a IndexedTool>> {
+    let mut out: BTreeMap<String, Vec<&IndexedTool>> = BTreeMap::new();
+    for tool in tools {
+        // Strip the common prefix and any separator after it, then take the
+        // first token of what remains. Fall back to "misc" if nothing's left.
+        let after = tool
+            .name
+            .strip_prefix(common_prefix)
+            .map(|s| s.trim_start_matches(['_', '-']))
+            .unwrap_or(tool.name.as_str());
+        let second = after
+            .split(['_', '-'])
+            .next()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("misc")
+            .to_string();
+        out.entry(second).or_default().push(tool);
+    }
+    out
 }
 
 // =================== Self help ===================
