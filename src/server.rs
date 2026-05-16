@@ -44,6 +44,8 @@ enum PendingAction {
     /// The user approved a specific list of servers to bulk-seed.
     /// Fingerprint pins the exact `Vec<SeedParams>` content.
     SeedBatch { fingerprint: String },
+    /// The user approved removing an index entry for the named server.
+    SeedRemove,
 }
 
 #[derive(Clone)]
@@ -171,6 +173,16 @@ pub struct SeedTool {
     /// Optional map of argument names → short hints.
     #[serde(default)]
     pub properties: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SeedRemoveParams {
+    /// Server name to remove from the librarian index.
+    pub server: String,
+    /// Required ONLY on the commit call. Get it from a prior propose call.
+    /// Omit (or null) to perform a propose call — returns a preview + token.
+    #[serde(default)]
+    pub confirm_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -310,6 +322,27 @@ impl LibrarianServer {
     )]
     async fn seed(&self, Parameters(p): Parameters<SeedParams>) -> Result<String, ErrorData> {
         self.seed_inner(p).map_err(internal)
+    }
+
+    #[tool(
+        name = "librarian_seed_remove",
+        description = "Remove a server entry from the librarian index. For cleaning up stale \
+                       seeds (servers no longer connected to the client). \
+                       TWO-STEP REQUIRED: \
+                       (1) Call WITHOUT confirm_token to receive a preview of what will be \
+                       removed + a confirm_token. \
+                       (2) Show the preview to the user and ask them to type 'I agree' or 'yes'. \
+                       (3) Re-call with the same server name plus confirm_token. \
+                       Notes about the server (learned/<server>.jsonl) are NOT deleted — they \
+                       persist on disk. Manifest files are NOT touched either. If a manifest \
+                       exists OR the server is in the MCP client config, it will be re-surfaced \
+                       on the next list/refresh."
+    )]
+    async fn seed_remove(
+        &self,
+        Parameters(p): Parameters<SeedRemoveParams>,
+    ) -> Result<String, ErrorData> {
+        self.seed_remove_inner(p).map_err(internal)
     }
 
     #[tool(
@@ -718,6 +751,138 @@ impl LibrarianServer {
         Ok(format!("seeded `{}` with {tool_count} tools", server_name))
     }
 
+    fn seed_remove_inner(&self, p: SeedRemoveParams) -> Result<String> {
+        validate_server_name(&p.server)?;
+
+        match p.confirm_token {
+            // ----- Propose: show what'll be removed + token. -----
+            None => {
+                let index = Index::load(&self.paths.cache_file)?;
+                let entry = index.servers.get(&p.server).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Error: `{}` is not in the librarian index. \
+                         Action: call `librarian_list()` to see what's actually indexed. \
+                         If a manifest file exists for this name but the entry isn't in the \
+                         index, the entry is surfaced via the manifest-only fallback — delete \
+                         the manifest file at `<config>/manifests/{}.toml` to remove it.",
+                        p.server,
+                        p.server,
+                    )
+                })?;
+
+                // Detect cases where removal won't have the intended permanent effect,
+                // so the preview can warn the user.
+                let manifest_exists = playbook::load_manifest(&self.paths, &p.server)
+                    .ok()
+                    .flatten()
+                    .is_some();
+                let in_client_config = discovery::discover()
+                    .ok()
+                    .map(|cs| cs.iter().any(|c| c.name == p.server))
+                    .unwrap_or(false);
+
+                let pending = PendingWrite {
+                    server: p.server.clone(),
+                    action: PendingAction::SeedRemove,
+                    expires_at: Utc::now() + chrono::Duration::seconds(PENDING_WRITE_TTL_SECS),
+                };
+                let token = self.issue_token(pending);
+
+                let mut preview = String::new();
+                preview.push_str("## SEED REMOVAL — PREVIEW (NOT YET COMMITTED)\n\n");
+                let _ = writeln!(preview, "Server: {}", entry.name);
+                let _ = writeln!(preview, "State:  {:?}", entry.probe_status);
+                if let Some(s) = &entry.summary {
+                    let _ = writeln!(preview, "Summary: {s}");
+                }
+                if let Some(c) = &entry.category {
+                    let _ = writeln!(preview, "Category: {c}");
+                }
+                let _ = writeln!(preview, "Tools:  {}", entry.tools.len());
+
+                preview.push('\n');
+                if manifest_exists || in_client_config {
+                    preview.push_str("**Warning — removal will likely not be permanent:**\n");
+                    if manifest_exists {
+                        preview.push_str(
+                            "- A manifest file exists for this server. After index removal it \
+                             will re-surface as `(manifest only — not installed)` in `librarian_list`. \
+                             To remove fully, delete the manifest file too.\n",
+                        );
+                    }
+                    if in_client_config {
+                        preview.push_str(
+                            "- This server is in your MCP client config. The next \
+                             `librarian_refresh` will re-add it. To remove permanently, also \
+                             remove the entry from your client config.\n",
+                        );
+                    }
+                    preview.push('\n');
+                }
+
+                preview.push_str(
+                    "Learned notes (`<data>/learned/<server>.jsonl`) are NOT deleted — they \
+                     persist on disk and reappear if the server is re-seeded under the same name.\n\n",
+                );
+
+                let _ = writeln!(
+                    preview,
+                    "---\n\
+                     **REVIEW REQUIRED.** Show the preview above to the user. \
+                     Ask them to type **\"I agree\"** or **\"yes\"** to commit. \
+                     Once they approve, re-call `librarian_seed_remove` with:\n\
+                     - `server=\"{}\"`,\n\
+                     - `confirm_token=\"{token}\"`.\n\n\
+                     Token expires in {} minutes and is single-use.",
+                    p.server,
+                    PENDING_WRITE_TTL_SECS / 60,
+                );
+                Ok(preview)
+            }
+            // ----- Commit: verify token, then remove. -----
+            Some(token) => {
+                let pending = self.consume_token(&token).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Error: `confirm_token` is not recognized, already used, or expired. \
+                         Action: re-call `librarian_seed_remove` without `confirm_token` to \
+                         get a fresh preview + token."
+                    )
+                })?;
+                if pending.server != p.server {
+                    anyhow::bail!(
+                        "Error: `confirm_token` was issued for server `{}`, but this commit is for `{}`. \
+                         Action: re-call without `confirm_token` for the correct server.",
+                        pending.server,
+                        p.server,
+                    );
+                }
+                if !matches!(pending.action, PendingAction::SeedRemove) {
+                    anyhow::bail!(
+                        "Error: `confirm_token` was issued for a different action (not a seed removal). \
+                         Action: re-call `librarian_seed_remove` without `confirm_token` to get a \
+                         removal-specific token."
+                    );
+                }
+
+                let server_name = p.server.clone();
+                lockfile::with_write_lock(&self.paths, || {
+                    let mut index = Index::load(&self.paths.cache_file)?;
+                    if index.servers.remove(&server_name).is_none() {
+                        anyhow::bail!(
+                            "Error: `{}` no longer in the index — removed by another process between \
+                             propose and commit.",
+                            server_name,
+                        );
+                    }
+                    index.save(&self.paths.cache_file)?;
+                    Ok(())
+                })?;
+
+                Ok(format!("Removed `{}` from the librarian index.", p.server))
+            }
+        }
+    }
+
     fn seed_batch_inner(&self, p: SeedBatchParams) -> Result<String> {
         // Validate up front: non-empty, no name collisions within the batch,
         // every server name passes the path-traversal validator.
@@ -1107,7 +1272,9 @@ impl LibrarianServer {
                 }
                 let (token_fingerprint, token_overwrite) = match &pending.action {
                     PendingAction::Write { fingerprint, overwrite } => (fingerprint, *overwrite),
-                    PendingAction::Restore | PendingAction::SeedBatch { .. } => anyhow::bail!(
+                    PendingAction::Restore
+                    | PendingAction::SeedBatch { .. }
+                    | PendingAction::SeedRemove => anyhow::bail!(
                         "Error: `confirm_token` was issued for a different action (not a manifest write). \
                          Action: re-call `librarian_manifest_write` without `confirm_token` to \
                          get a write-specific token."
@@ -1611,6 +1778,132 @@ mod tests {
                 allow_duplicate: false,
             })
             .unwrap();
+    }
+
+    #[test]
+    fn seed_remove_round_trip() {
+        let (_tmp, paths) = test_paths();
+        let server = LibrarianServer::new(paths.clone());
+        // Seed an entry to remove
+        server
+            .seed_inner(SeedParams {
+                server: "stale_server".into(),
+                summary: Some("to be removed".into()),
+                category: Some("comms".into()),
+                tools: vec![],
+            })
+            .unwrap();
+        assert!(
+            Index::load(&paths.cache_file).unwrap().servers.contains_key("stale_server")
+        );
+
+        // Propose
+        let preview = server
+            .seed_remove_inner(SeedRemoveParams {
+                server: "stale_server".into(),
+                confirm_token: None,
+            })
+            .unwrap();
+        assert!(preview.contains("SEED REMOVAL"));
+        assert!(preview.contains("stale_server"));
+        let token = extract_token(&preview);
+
+        // Commit
+        let msg = server
+            .seed_remove_inner(SeedRemoveParams {
+                server: "stale_server".into(),
+                confirm_token: Some(token),
+            })
+            .unwrap();
+        assert!(msg.contains("Removed"));
+        assert!(
+            !Index::load(&paths.cache_file).unwrap().servers.contains_key("stale_server")
+        );
+    }
+
+    #[test]
+    fn seed_remove_rejects_unknown_server() {
+        let (_tmp, paths) = test_paths();
+        let server = LibrarianServer::new(paths);
+        let err = server
+            .seed_remove_inner(SeedRemoveParams {
+                server: "never_seeded".into(),
+                confirm_token: None,
+            })
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("not in the librarian index"));
+    }
+
+    #[test]
+    fn seed_remove_warns_when_manifest_exists() {
+        let (_tmp, paths) = test_paths();
+        let server = LibrarianServer::new(paths.clone());
+        // Seed an entry
+        server
+            .seed_inner(SeedParams {
+                server: "with_manifest".into(),
+                summary: Some("seeded".into()),
+                category: None,
+                tools: vec![],
+            })
+            .unwrap();
+        // And write a manifest for the same name
+        crate::playbook::write_manifest(
+            &paths,
+            "with_manifest",
+            &Manifest {
+                meta: crate::playbook::ManifestMeta {
+                    summary: Some("real manifest".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let preview = server
+            .seed_remove_inner(SeedRemoveParams {
+                server: "with_manifest".into(),
+                confirm_token: None,
+            })
+            .unwrap();
+        assert!(
+            preview.contains("manifest file exists"),
+            "should warn about manifest re-surfacing: {preview}"
+        );
+    }
+
+    #[test]
+    fn seed_remove_rejects_cross_server_token() {
+        let (_tmp, paths) = test_paths();
+        let server = LibrarianServer::new(paths);
+        // Seed two entries
+        for name in ["aaa", "bbb"] {
+            server
+                .seed_inner(SeedParams {
+                    server: name.into(),
+                    summary: None,
+                    category: None,
+                    tools: vec![],
+                })
+                .unwrap();
+        }
+        // Propose removal of "aaa"
+        let propose = server
+            .seed_remove_inner(SeedRemoveParams {
+                server: "aaa".into(),
+                confirm_token: None,
+            })
+            .unwrap();
+        let token = extract_token(&propose);
+        // Try to use that token to commit removal of "bbb" — must reject.
+        let err = server
+            .seed_remove_inner(SeedRemoveParams {
+                server: "bbb".into(),
+                confirm_token: Some(token),
+            })
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("issued for server"));
     }
 
     #[test]

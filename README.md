@@ -17,7 +17,7 @@ I built this for me, and I run it daily with Claude Code and Codex. Patches welc
 7. [Install](#install)
 8. [Configure (add to your MCP client)](#configure-add-to-your-mcp-client)
 9. [First run — index everything (Claude Code, Claude Desktop, Codex)](#first-run--index-everything)
-10. [The twelve tools](#the-twelve-tools)
+10. [The thirteen tools](#the-thirteen-tools)
 11. [Manifests — your canonical playbooks](#manifests--your-canonical-playbooks)
 12. [Workflow recipes](#workflow-recipes)
 13. [Storage paths](#storage-paths)
@@ -231,7 +231,7 @@ One approval covers everything. After the first run you have one tool call (`lib
 
 That works — they each spawn their own librarian process sharing the same data files. Cross-process writes are serialized via an advisory file lock (see [Concurrency](#security--storage)), so concurrent `librarian_note` / `librarian_manifest_write` / `librarian_refresh` calls won't corrupt state. Each client should still run `librarian_onboarding()` once on first install so the hosted servers visible to *that specific client* get seeded under names matching its prefixes.
 
-## The twelve tools
+## The thirteen tools
 
 | Tool | What it does |
 |---|---|
@@ -242,6 +242,7 @@ That works — they each spawn their own librarian process sharing the same data
 | `librarian_note` | Agent appends an observation about a server's behavior. Soft-dedup at write time on (server, tool, kind, normalized claim). `allow_duplicate=true` to bypass. |
 | `librarian_seed_playbook` | Bootstrap a single hosted/cloud server entry from the tool list the agent already sees in its deferred-tools reminder. No approval gate — for fast incremental "I just noticed a new server" additions. |
 | `librarian_seed_batch` | Bulk-seed many hosted servers in one approved transaction. Two-step propose/commit gate (one user approval covers the whole batch). The recommended path for first-install onboarding when there are 5+ hosted MCPs to register. |
+| `librarian_seed_remove` | Remove a server entry from the index. For cleaning up stale seeds (servers no longer connected). Two-step propose/commit gate. Manifests and learned notes are not deleted; warning surfaces if removal won't be permanent. |
 | `librarian_refresh` | Reprobe local stdio servers. Flags notes whose schemas drifted. |
 | `librarian_manifest_write` | Author or replace a manifest. Two-step propose/commit gate: first call returns a structured preview + a single-use token; second call with that token + the same content (content-fingerprinted) commits. |
 | `librarian_manifest_diff` | Show what changed between current and the auto-backup. Read-only. mtime-labeled to disambiguate post-restore direction. |
