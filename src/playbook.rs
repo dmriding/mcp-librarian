@@ -943,20 +943,41 @@ fn render_manifest_schema_topic() -> String {
          multi-line bodies without escape mania.\n\n",
     );
 
-    s.push_str("## TOML grammar trap (read this first)\n\n");
+    s.push_str("## TOML grammar trap (read this FIRST — load-bearing)\n\n");
     s.push_str(
-        "Root-level keys MUST appear BEFORE any `[section]` or `[[section]]` header. \
-         Otherwise TOML attaches them to the previous table and parsing fails or \
-         silently produces a misshapen manifest.\n\n",
+        "**The single most common way to silently corrupt a manifest:** writing \
+         `gotchas = [...]` at the end of the file, after `[meta]` / `[[topics]]` / etc. \
+         Don't do it.\n\n",
     );
-    s.push_str("**Correct:**\n```toml\n");
-    s.push_str("gotchas = [\"item 1\", \"item 2\"]\n\n");
-    s.push_str("[meta]\ncategory = \"...\"\n");
+    s.push_str(
+        "In TOML, root-level keys MUST appear BEFORE any `[section]` or `[[section]]` header. \
+         Once a section header opens, every subsequent key belongs to that section until another \
+         header arrives. There is NO way to 'close' a section and return to root. So `gotchas` \
+         written below a section gets scoped to that section, our parser silently drops it (the \
+         Manifest struct expects gotchas at root), and you commit a manifest with zero gotchas \
+         even though you wrote eight.\n\n",
+    );
+    s.push_str(
+        "**The librarian detects this and rejects loudly at propose time** (see the validation \
+         section below). But the cheapest fix is to put `gotchas` at the top of your file.\n\n",
+    );
+    s.push_str("**Correct ordering** (root-level keys first, then sections):\n```toml\n");
+    s.push_str("gotchas = [\"item 1\", \"item 2\"]    # root-level, MUST come first\n\n");
+    s.push_str("[meta]\ncategory = \"comms\"\nsummary  = \"...\"\n\n");
+    s.push_str("[[tool_categories]]\nname  = \"Read\"\ntools = [\"foo_get\"]\n");
     s.push_str("```\n\n");
-    s.push_str("**Wrong** (gotchas becomes part of `[meta]`):\n```toml\n");
-    s.push_str("[meta]\ncategory = \"...\"\n\n");
-    s.push_str("gotchas = [\"item 1\"]\n");
+    s.push_str("**Wrong** (gotchas silently scoped into `[meta]`, dropped):\n```toml\n");
+    s.push_str("[meta]\ncategory = \"comms\"\n\n");
+    s.push_str("gotchas = [\"item 1\"]    # WRONG — this becomes meta.gotchas, lost\n");
     s.push_str("```\n\n");
+    s.push_str("**Also wrong** (gotchas scoped into the LAST `[[topics]]` table):\n```toml\n");
+    s.push_str("[[topics]]\nname = \"auth\"\ntitle = \"...\"\nbody = \"...\"\n\n");
+    s.push_str("gotchas = [\"item 1\"]    # WRONG — this becomes topics[N].gotchas, lost\n");
+    s.push_str("```\n\n");
+    s.push_str(
+        "**Rule of thumb:** the document is shaped like an upside-down funnel. \
+         Loose stuff at the top, structured tables below. Never the other way around.\n\n",
+    );
 
     s.push_str("## Fields\n\n");
     s.push_str("### Root\n");
@@ -1017,7 +1038,22 @@ fn render_manifest_schema_topic() -> String {
         "`librarian_manifest_write` always runs in propose mode first (no `confirm_token`): \
          that call validates the TOML and returns a structured preview. Use it as a \
          dry-run — preview a candidate manifest, abandon the token, iterate. Tokens \
-         expire after 5 minutes; no commit happens without one.\n",
+         expire after 5 minutes; no commit happens without one.\n\n",
+    );
+    s.push_str("**What the propose call catches before you commit:**\n\n");
+    s.push_str(
+        "- TOML syntax errors (with line/col).\n\
+         - **Misplaced `gotchas` key**: if your TOML has a `gotchas = [...]` array that \
+           landed inside a sub-table because of ordering (see the grammar trap above), the \
+           propose call rejects loudly with the offending parent named (e.g. \"found inside \
+           `[meta]`\"). No silent data loss.\n\
+         - Empty manifests (no meta, no categories, no workflows, no topics, no gotchas) \
+           are refused — empty content shouldn't clobber a curated file.\n\n",
+    );
+    s.push_str(
+        "**Read the preview carefully.** The preview shows a COUNT for every section, \
+         including zero. If you submitted 8 gotchas and the preview shows `Gotchas: 0 entries`, \
+         that's a smoking gun — the array got lost. Reject the proposal, fix the TOML, retry.\n",
     );
     s
 }
@@ -1085,34 +1121,44 @@ pub fn render_manifest_preview(
     }
     out.push('\n');
 
-    if !manifest.tool_categories.is_empty() {
-        let _ = writeln!(out, "Tool categories ({}):", manifest.tool_categories.len());
+    // Always render every section's count — even zero. Silent absence is a
+    // real failure mode: TOML scoping rules can silently scope a root-level
+    // `gotchas = [...]` to a previous `[section]` table, producing a parsed
+    // Manifest with empty gotchas. The agent (and user) can only catch that
+    // by scanning the preview for counts. An "always show" line means an
+    // unexpected zero is visible at a glance.
+    let _ = writeln!(out, "Tool categories ({}):", manifest.tool_categories.len());
+    if manifest.tool_categories.is_empty() {
+        out.push_str("  (none)\n");
+    } else {
         for c in &manifest.tool_categories {
             let _ = writeln!(out, "  - {} ({} tools)", c.name, c.tools.len());
         }
-        out.push('\n');
     }
+    out.push('\n');
 
-    if !manifest.workflows.is_empty() {
-        let _ = writeln!(out, "Workflows ({}):", manifest.workflows.len());
+    let _ = writeln!(out, "Workflows ({}):", manifest.workflows.len());
+    if manifest.workflows.is_empty() {
+        out.push_str("  (none)\n");
+    } else {
         for w in &manifest.workflows {
             let _ = writeln!(out, "  - {}", w.title);
         }
-        out.push('\n');
     }
+    out.push('\n');
 
-    if !manifest.topics.is_empty() {
-        let _ = writeln!(out, "Topics ({}):", manifest.topics.len());
+    let _ = writeln!(out, "Topics ({}):", manifest.topics.len());
+    if manifest.topics.is_empty() {
+        out.push_str("  (none)\n");
+    } else {
         for t in &manifest.topics {
             let _ = writeln!(out, "  - {} ({})", t.name, t.title);
         }
-        out.push('\n');
     }
+    out.push('\n');
 
-    if !manifest.gotchas.is_empty() {
-        let _ = writeln!(out, "Gotchas: {} entries", manifest.gotchas.len());
-        out.push('\n');
-    }
+    let _ = writeln!(out, "Gotchas: {} entries", manifest.gotchas.len());
+    out.push('\n');
 
     out
 }
