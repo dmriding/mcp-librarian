@@ -16,14 +16,15 @@ I built this for me, and I run it daily with Claude Code and Codex. Patches welc
 6. [A 60-second tour from the agent's POV](#a-60-second-tour-from-the-agents-pov)
 7. [Install](#install)
 8. [Configure (add to your MCP client)](#configure-add-to-your-mcp-client)
-9. [The ten tools](#the-ten-tools)
-10. [Manifests — your canonical playbooks](#manifests--your-canonical-playbooks)
-11. [Workflow recipes](#workflow-recipes)
-12. [Storage paths](#storage-paths)
-13. [Environment & CLI](#environment--cli)
-14. [Security & storage](#security--storage)
-15. [Known limitations](#known-limitations)
-16. [Licenses & contributing](#licenses--contributing)
+9. [First run — index everything (Claude Code, Claude Desktop, Codex)](#first-run--index-everything)
+10. [The eleven tools](#the-eleven-tools)
+11. [Manifests — your canonical playbooks](#manifests--your-canonical-playbooks)
+12. [Workflow recipes](#workflow-recipes)
+13. [Storage paths](#storage-paths)
+14. [Environment & CLI](#environment--cli)
+15. [Security & storage](#security--storage)
+16. [Known limitations](#known-limitations)
+17. [Licenses & contributing](#licenses--contributing)
 
 ---
 
@@ -160,27 +161,73 @@ The result is one self-contained ~12 MB binary. No runtime dependencies, no Node
 }
 ```
 
-### Claude Desktop (`%APPDATA%\Claude\claude_desktop_config.json`)
+### Claude Desktop (`%APPDATA%\Claude\claude_desktop_config.json` on Windows; `~/Library/Application Support/Claude/claude_desktop_config.json` on macOS)
 
-Same shape. Use the full path to the binary.
+Same shape:
+
+```jsonc
+{
+  "mcpServers": {
+    "librarian": {
+      "command": "C:\\path\\to\\mcp-librarian.exe",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+After saving the config, **fully quit and relaunch Claude Desktop** (closing the window isn't enough — use Quit from the menu or kill it from the system tray). The librarian will appear under the hammer/tools icon in the input area on next chat.
 
 ### Codex (or any other MCP client)
 
 The MCP transport is plain stdio. Add an entry pointing `command` at the binary with `args: ["serve"]` and you're in.
 
-After configuring, restart your MCP client. Then in a session:
+## First run — index everything
+
+After installing the librarian into one of the clients above, run this **once** to populate the index with every connected MCP server.
+
+### The one-call path (recommended)
 
 ```
-librarian_list()       # see what librarian found
-librarian_refresh()    # probe every stdio server once to populate the index
+librarian_onboarding()
 ```
 
-You'll see your other servers populate immediately. Schemas come in after the first `librarian_refresh`.
+Returns a step-by-step bootstrap prompt the agent reads and executes. It handles:
 
-## The ten tools
+1. `librarian_refresh()` — auto-discovers and probes every **local stdio** MCP server (the ones in `~/.claude.json` / `claude_desktop_config.json`)
+2. Diffs that result against the MCP servers the agent can see in its own deferred-tools reminder
+3. For each **hosted/cloud** MCP visible to the agent but missing from the index (e.g. `claude.ai_Slack`, `claude.ai_Notion`, OAuth-connected servers), runs `librarian_seed_playbook` with the right name, category, and tool list
+4. Verifies with a final `librarian_list()`
+
+The hosted/cloud distinction matters because the librarian *cannot probe hosted MCPs* by spawning — they only exist inside the client's mediator. The agent has to seed them from what it can see in its own context.
+
+### The manual path
+
+If you'd rather drive it yourself:
+
+```
+librarian_refresh()            # local stdio servers
+librarian_list()               # see what got indexed
+# For each missing hosted/cloud server:
+librarian_seed_playbook(
+    server="claude.ai_Slack",
+    summary="Slack workspace MCP via claude.ai mediator — …",
+    category="comms",
+    tools=[{"name": "slack_send_message", "description": "..."}, ...]
+)
+```
+
+Either way, after the first run you have one tool call (`librarian_list`) that returns the full landscape of every connected MCP, including the hosted ones.
+
+### Running both Claude Code AND Claude Desktop?
+
+That works — they each spawn their own librarian process sharing the same data files. Cross-process writes are serialized via an advisory file lock (see [Concurrency](#security--storage)), so concurrent `librarian_note` / `librarian_manifest_write` / `librarian_refresh` calls won't corrupt state. Each client should still run `librarian_onboarding()` once on first install so the hosted servers visible to *that specific client* get seeded under names matching its prefixes.
+
+## The eleven tools
 
 | Tool | What it does |
 |---|---|
+| `librarian_onboarding` | Returns a one-shot bootstrap prompt for first-install setup — refresh local stdio + seed every hosted server visible in the agent's deferred-tools reminder. |
 | `librarian_list` | Directory of all known MCP servers, grouped by category. Optional `category` filter. |
 | `librarian_help` | Playbook for one server. No `topic` = overview; with `topic` = drill-down. `server="librarian"` returns the librarian's own playbook. `topic="manifest_schema"` returns the TOML reference. |
 | `librarian_search` | Fuzzy-match across every known tool's name + description. Stop-word filtered. |
