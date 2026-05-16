@@ -77,6 +77,57 @@ pub fn override_config_path() -> Option<PathBuf> {
     std::env::var_os("MCP_LIBRARIAN_CONFIG").map(PathBuf::from)
 }
 
+/// Maximum length for a server name. 64 chars is generous for real names
+/// (the longest server I've seen in the wild is ~25 chars) and short enough
+/// to prevent abuse via overlong filenames.
+pub const MAX_SERVER_NAME_LEN: usize = 64;
+
+/// Validate that a `server` argument is safe to splice into a filesystem
+/// path. The librarian maps `server` → `<manifest_dir>/<server>.toml` and
+/// `<learned_dir>/<server>.jsonl`. Without validation, an agent-supplied
+/// name like `"../../etc/passwd"` would let a write tool escape its data
+/// directory.
+///
+/// Allowed characters: `[A-Za-z0-9_.-]`. Length 1..=64. Leading `.` is
+/// forbidden (rules out `.`, `..`, hidden files). No path separators,
+/// no control bytes, no NUL.
+pub fn validate_server_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        anyhow::bail!(
+            "Error: `server` is empty. Action: pass the name as it appears in your MCP config \
+             (e.g. \"slack\", \"forge\")."
+        );
+    }
+    if name.len() > MAX_SERVER_NAME_LEN {
+        anyhow::bail!(
+            "Error: `server` is too long ({} > {MAX_SERVER_NAME_LEN}). \
+             Action: trim it. Real server names are typically <30 chars.",
+            name.len(),
+        );
+    }
+    if name.starts_with('.') {
+        anyhow::bail!(
+            "Error: `server` starts with `.` (`{name}`) which is reserved. \
+             Action: pick a name that doesn't begin with a dot. `.` and `..` \
+             are filesystem path components, not server names."
+        );
+    }
+    for (i, c) in name.char_indices() {
+        if !is_allowed_server_char(c) {
+            anyhow::bail!(
+                "Error: `server` contains disallowed character `{c}` at position {i} (`{name}`). \
+                 Action: server names must match `[A-Za-z0-9_.-]+`. No spaces, slashes, or other \
+                 punctuation — this name is used in filesystem paths.",
+            );
+        }
+    }
+    Ok(())
+}
+
+fn is_allowed_server_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.'
+}
+
 #[allow(dead_code)]
 pub fn home_dir() -> Option<PathBuf> {
     BaseDirs::new().map(|b| b.home_dir().to_path_buf())

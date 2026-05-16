@@ -502,6 +502,62 @@ fn note_params_accepts_valid_input() {
     assert!(result.is_ok(), "valid input should parse: {:?}", result.err());
 }
 
+// --- server name validation (path traversal defense) ---
+
+#[test]
+fn validate_server_name_accepts_realistic_names() {
+    use mcp_librarian::config::validate_server_name;
+    for name in [
+        "slack",
+        "claude.ai_Slack",
+        "forge",
+        "mcp-librarian",
+        "context7",
+        "a",
+        "a1.2_3-4",
+    ] {
+        validate_server_name(name).unwrap_or_else(|e| panic!("`{name}` should be valid: {e}"));
+    }
+}
+
+#[test]
+fn validate_server_name_blocks_path_traversal() {
+    use mcp_librarian::config::validate_server_name;
+    for bad in [
+        "..",
+        "../",
+        "../foo",
+        "..\\foo",
+        "../../etc/passwd",
+        "foo/bar",
+        "foo\\bar",
+    ] {
+        assert!(
+            validate_server_name(bad).is_err(),
+            "path-traversal name `{bad}` must be rejected"
+        );
+    }
+}
+
+#[test]
+fn validate_server_name_blocks_empty_and_overlong() {
+    use mcp_librarian::config::{MAX_SERVER_NAME_LEN, validate_server_name};
+    assert!(validate_server_name("").is_err());
+    let too_long = "a".repeat(MAX_SERVER_NAME_LEN + 1);
+    assert!(validate_server_name(&too_long).is_err());
+}
+
+#[test]
+fn validate_server_name_blocks_leading_dot_and_control_chars() {
+    use mcp_librarian::config::validate_server_name;
+    assert!(validate_server_name(".hidden").is_err(), "leading dot must be rejected");
+    assert!(validate_server_name(".").is_err());
+    assert!(validate_server_name("foo\0bar").is_err(), "NUL byte must be rejected");
+    assert!(validate_server_name("foo\nbar").is_err(), "newline must be rejected");
+    assert!(validate_server_name("foo bar").is_err(), "space must be rejected");
+    assert!(validate_server_name("foo:bar").is_err(), "colon must be rejected");
+}
+
 // --- search surfaces manifest-only servers (Fix 3) ---
 
 #[test]

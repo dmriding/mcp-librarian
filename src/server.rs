@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 
-use crate::config::{DEFAULT_BRIEF_TOKEN_BUDGET, Paths};
+use crate::config::{DEFAULT_BRIEF_TOKEN_BUDGET, Paths, validate_server_name};
 use crate::discovery;
 use crate::fetch::{self, FetchState};
 use crate::index::{
@@ -453,6 +453,7 @@ impl LibrarianServer {
                 Some(t) => playbook::render_librarian_topic(t),
             });
         }
+        validate_server_name(&p.server)?;
 
         let index = Index::load(&self.paths.cache_file)?;
         let entry = match index.servers.get(&p.server) {
@@ -541,6 +542,7 @@ impl LibrarianServer {
     }
 
     fn note_inner(&self, p: NoteParams) -> Result<String> {
+        validate_server_name(&p.server)?;
         // The read-check-write sequence below MUST be atomic across processes,
         // or two clients writing the same observation concurrently can both
         // pass the dedup check before either commits and produce duplicates —
@@ -618,6 +620,7 @@ impl LibrarianServer {
     }
 
     fn seed_inner(&self, p: SeedParams) -> Result<String> {
+        validate_server_name(&p.server)?;
         let now = Utc::now();
         let tool_count = p.tools.len();
         let server_name = p.server.clone();
@@ -660,6 +663,9 @@ impl LibrarianServer {
     }
 
     async fn refresh_inner(&self, p: RefreshParams) -> Result<String> {
+        if let Some(name) = p.server.as_deref() {
+            validate_server_name(name)?;
+        }
         let configs = discovery::discover()?;
         // Snapshot the prior index *before* probing for drift detection. We
         // don't hold the lock during probe (it can take seconds per server)
@@ -756,6 +762,7 @@ impl LibrarianServer {
 
 impl LibrarianServer {
     fn manifest_write_inner(&self, p: ManifestWriteParams) -> Result<String> {
+        validate_server_name(&p.server)?;
         // Guard 0: exactly one input form must be provided. Parse TOML if given;
         // otherwise use the structured value. TOML is preferred because nested JSON
         // with embedded newlines causes some MCP clients to hang during serialization.
@@ -929,6 +936,7 @@ impl LibrarianServer {
 
 impl LibrarianServer {
     fn manifest_diff_inner(&self, p: ManifestDiffParams) -> Result<String> {
+        validate_server_name(&p.server)?;
         let current = playbook::load_manifest(&self.paths, &p.server)?;
         let backup = playbook::load_manifest_backup(&self.paths, &p.server)?;
 
@@ -980,6 +988,7 @@ impl LibrarianServer {
     }
 
     fn manifest_restore_inner(&self, p: ManifestRestoreParams) -> Result<String> {
+        validate_server_name(&p.server)?;
         let backup = playbook::load_manifest_backup(&self.paths, &p.server)?;
         if backup.is_none() {
             anyhow::bail!(
@@ -1360,6 +1369,103 @@ mod tests {
                 allow_duplicate: false,
             })
             .unwrap();
+    }
+
+    #[test]
+    fn tools_reject_path_traversal_in_server_name() {
+        // Every write-class tool that accepts `server` must reject names that
+        // would escape the data directory. We don't enumerate every path; the
+        // dedicated validate_server_name tests cover that. Here we just check
+        // that the wiring is in place at each tool entry.
+        let (_tmp, paths) = test_paths();
+        let server = LibrarianServer::new(paths);
+        let bad = "../escape".to_string();
+
+        // librarian_note
+        let err = server
+            .note_inner(NoteParams {
+                server: bad.clone(),
+                tool: None,
+                topic: None,
+                kind: NoteKind::Tip,
+                basis: NoteBasis::Observed,
+                claim: "x".into(),
+                tags: vec![],
+                allow_duplicate: false,
+            })
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("starts with `.`") || msg.contains("disallowed character"),
+            "expected server-name rejection, got: {msg}"
+        );
+
+        // librarian_seed_playbook
+        let err = server
+            .seed_inner(SeedParams {
+                server: bad.clone(),
+                summary: None,
+                category: None,
+                tools: vec![],
+            })
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("starts with `.`") || msg.contains("disallowed character"),
+            "expected server-name rejection, got: {msg}"
+        );
+
+        // librarian_manifest_write
+        let err = server
+            .manifest_write_inner(ManifestWriteParams {
+                server: bad.clone(),
+                manifest_toml: Some("[meta]\nsummary=\"x\"\n".into()),
+                manifest: None,
+                confirm_token: None,
+                overwrite: false,
+            })
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("starts with `.`") || msg.contains("disallowed character"),
+            "expected server-name rejection, got: {msg}"
+        );
+
+        // librarian_manifest_diff
+        let err = server
+            .manifest_diff_inner(ManifestDiffParams { server: bad.clone() })
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("starts with `.`") || msg.contains("disallowed character"),
+            "expected server-name rejection, got: {msg}"
+        );
+
+        // librarian_manifest_restore
+        let err = server
+            .manifest_restore_inner(ManifestRestoreParams {
+                server: bad.clone(),
+                confirm_token: None,
+            })
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("starts with `.`") || msg.contains("disallowed character"),
+            "expected server-name rejection, got: {msg}"
+        );
+
+        // librarian_help — should reject too (read tool but still uses paths).
+        let err = server
+            .help_inner(HelpParams {
+                server: bad.clone(),
+                topic: None,
+            })
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("starts with `.`") || msg.contains("disallowed character"),
+            "expected server-name rejection, got: {msg}"
+        );
     }
 
     #[test]
