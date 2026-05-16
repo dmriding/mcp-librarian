@@ -145,10 +145,14 @@ pub fn manifest_path_for(paths: &Paths, server: &str) -> std::path::PathBuf {
 pub fn render_list(entries: &[(ServerEntry, Option<Manifest>)], category_filter: Option<&str>) -> String {
     let mut buckets: BTreeMap<String, Vec<&(ServerEntry, Option<Manifest>)>> = BTreeMap::new();
     for pair in entries {
+        // Precedence: manifest meta wins (authored canon), then the entry's
+        // own category (set by seed_playbook for hosted servers without a
+        // manifest yet), then "uncategorized" as a last resort.
         let cat = pair
             .1
             .as_ref()
             .and_then(|m| m.meta.category.clone())
+            .or_else(|| pair.0.category.clone())
             .unwrap_or_else(|| "uncategorized".to_string());
         if let Some(filter) = category_filter
             && !cat.eq_ignore_ascii_case(filter)
