@@ -17,7 +17,7 @@ I built this for me, and I run it daily with Claude Code and Codex. Patches welc
 7. [Install](#install)
 8. [Configure (add to your MCP client)](#configure-add-to-your-mcp-client)
 9. [First run — index everything (Claude Code, Claude Desktop, Codex)](#first-run--index-everything)
-10. [The eleven tools](#the-eleven-tools)
+10. [The twelve tools](#the-twelve-tools)
 11. [Manifests — your canonical playbooks](#manifests--your-canonical-playbooks)
 12. [Workflow recipes](#workflow-recipes)
 13. [Storage paths](#storage-paths)
@@ -208,22 +208,30 @@ If you'd rather drive it yourself:
 ```
 librarian_refresh()            # local stdio servers
 librarian_list()               # see what got indexed
-# For each missing hosted/cloud server:
-librarian_seed_playbook(
-    server="claude.ai_Slack",
-    summary="Slack workspace MCP via claude.ai mediator — …",
-    category="comms",
-    tools=[{"name": "slack_send_message", "description": "..."}, ...]
+# Build a single batch of every hosted server still missing, then:
+librarian_seed_batch(
+    servers=[
+        {
+            "server": "claude.ai_Slack",
+            "summary": "Slack workspace MCP via claude.ai mediator — …",
+            "category": "comms",
+            "tools": [{"name": "slack_send_message", "description": "..."}, ...]
+        },
+        { ...next server... },
+        ...
+    ]
 )
+# Returns a preview + a confirm_token. After reading the preview and saying "yes":
+librarian_seed_batch(servers=[...same as above...], confirm_token="…")
 ```
 
-Either way, after the first run you have one tool call (`librarian_list`) that returns the full landscape of every connected MCP, including the hosted ones.
+One approval covers everything. After the first run you have one tool call (`librarian_list`) that returns the full landscape of every connected MCP, including the hosted ones.
 
 ### Running both Claude Code AND Claude Desktop?
 
 That works — they each spawn their own librarian process sharing the same data files. Cross-process writes are serialized via an advisory file lock (see [Concurrency](#security--storage)), so concurrent `librarian_note` / `librarian_manifest_write` / `librarian_refresh` calls won't corrupt state. Each client should still run `librarian_onboarding()` once on first install so the hosted servers visible to *that specific client* get seeded under names matching its prefixes.
 
-## The eleven tools
+## The twelve tools
 
 | Tool | What it does |
 |---|---|
@@ -232,7 +240,8 @@ That works — they each spawn their own librarian process sharing the same data
 | `librarian_help` | Playbook for one server. No `topic` = overview; with `topic` = drill-down. `server="librarian"` returns the librarian's own playbook. `topic="manifest_schema"` returns the TOML reference. |
 | `librarian_search` | Fuzzy-match across every known tool's name + description. Stop-word filtered. |
 | `librarian_note` | Agent appends an observation about a server's behavior. Soft-dedup at write time on (server, tool, kind, normalized claim). `allow_duplicate=true` to bypass. |
-| `librarian_seed_playbook` | Bootstrap a server entry from the tool list the agent already sees in its deferred-tools reminder. The way to register hosted/cloud servers. |
+| `librarian_seed_playbook` | Bootstrap a single hosted/cloud server entry from the tool list the agent already sees in its deferred-tools reminder. No approval gate — for fast incremental "I just noticed a new server" additions. |
+| `librarian_seed_batch` | Bulk-seed many hosted servers in one approved transaction. Two-step propose/commit gate (one user approval covers the whole batch). The recommended path for first-install onboarding when there are 5+ hosted MCPs to register. |
 | `librarian_refresh` | Reprobe local stdio servers. Flags notes whose schemas drifted. |
 | `librarian_manifest_write` | Author or replace a manifest. Two-step propose/commit gate: first call returns a structured preview + a single-use token; second call with that token + the same content (content-fingerprinted) commits. |
 | `librarian_manifest_diff` | Show what changed between current and the auto-backup. Read-only. mtime-labeled to disambiguate post-restore direction. |
