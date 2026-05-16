@@ -267,7 +267,7 @@ impl LibrarianServer {
                        Add `category` to filter. One call, agent knows the landscape."
     )]
     async fn list(&self, Parameters(p): Parameters<ListParams>) -> Result<String, ErrorData> {
-        self.list_inner(p).map_err(internal)
+        self.list_inner(p).map_or_else(|e| Ok(format_diagnostic(e)), Ok)
     }
 
     #[tool(
@@ -291,7 +291,7 @@ impl LibrarianServer {
                        With topic = focused drill-down. Use `server=\"librarian\"` for the librarian itself."
     )]
     async fn help(&self, Parameters(p): Parameters<HelpParams>) -> Result<String, ErrorData> {
-        self.help_inner(p).map_err(internal)
+        self.help_inner(p).map_or_else(|e| Ok(format_diagnostic(e)), Ok)
     }
 
     #[tool(
@@ -300,7 +300,7 @@ impl LibrarianServer {
                        Returns ranked (server, tool, summary) candidates — cheap to scan before paying for a full schema load."
     )]
     async fn search(&self, Parameters(p): Parameters<SearchParams>) -> Result<String, ErrorData> {
-        self.search_inner(p).map_err(internal)
+        self.search_inner(p).map_or_else(|e| Ok(format_diagnostic(e)), Ok)
     }
 
     #[tool(
@@ -310,7 +310,7 @@ impl LibrarianServer {
                        This is how the librarian gets smarter with use."
     )]
     async fn note(&self, Parameters(p): Parameters<NoteParams>) -> Result<String, ErrorData> {
-        self.note_inner(p).map_err(internal)
+        self.note_inner(p).map_or_else(|e| Ok(format_diagnostic(e)), Ok)
     }
 
     #[tool(
@@ -321,7 +321,7 @@ impl LibrarianServer {
                        `librarian_seed_batch` — one user approval covers the whole batch."
     )]
     async fn seed(&self, Parameters(p): Parameters<SeedParams>) -> Result<String, ErrorData> {
-        self.seed_inner(p).map_err(internal)
+        self.seed_inner(p).map_or_else(|e| Ok(format_diagnostic(e)), Ok)
     }
 
     #[tool(
@@ -342,7 +342,7 @@ impl LibrarianServer {
         &self,
         Parameters(p): Parameters<SeedRemoveParams>,
     ) -> Result<String, ErrorData> {
-        self.seed_remove_inner(p).map_err(internal)
+        self.seed_remove_inner(p).map_or_else(|e| Ok(format_diagnostic(e)), Ok)
     }
 
     #[tool(
@@ -363,7 +363,7 @@ impl LibrarianServer {
         &self,
         Parameters(p): Parameters<SeedBatchParams>,
     ) -> Result<String, ErrorData> {
-        self.seed_batch_inner(p).map_err(internal)
+        self.seed_batch_inner(p).map_or_else(|e| Ok(format_diagnostic(e)), Ok)
     }
 
     #[tool(
@@ -372,7 +372,7 @@ impl LibrarianServer {
                        Cache is read-only on the hot path; refresh is always explicit."
     )]
     async fn refresh(&self, Parameters(p): Parameters<RefreshParams>) -> Result<String, ErrorData> {
-        self.refresh_inner(p).await.map_err(internal)
+        self.refresh_inner(p).await.map_or_else(|e| Ok(format_diagnostic(e)), Ok)
     }
 
     #[tool(
@@ -394,7 +394,7 @@ impl LibrarianServer {
         &self,
         Parameters(p): Parameters<ManifestWriteParams>,
     ) -> Result<String, ErrorData> {
-        self.manifest_write_inner(p).map_err(internal)
+        self.manifest_write_inner(p).map_or_else(|e| Ok(format_diagnostic(e)), Ok)
     }
 
     #[tool(
@@ -408,7 +408,7 @@ impl LibrarianServer {
         &self,
         Parameters(p): Parameters<ManifestDiffParams>,
     ) -> Result<String, ErrorData> {
-        self.manifest_diff_inner(p).map_err(internal)
+        self.manifest_diff_inner(p).map_or_else(|e| Ok(format_diagnostic(e)), Ok)
     }
 
     #[tool(
@@ -425,7 +425,7 @@ impl LibrarianServer {
         &self,
         Parameters(p): Parameters<ManifestRestoreParams>,
     ) -> Result<String, ErrorData> {
-        self.manifest_restore_inner(p).map_err(internal)
+        self.manifest_restore_inner(p).map_or_else(|e| Ok(format_diagnostic(e)), Ok)
     }
 
     #[tool(
@@ -444,7 +444,7 @@ impl LibrarianServer {
         &self,
         Parameters(p): Parameters<FetchDocsParams>,
     ) -> Result<String, ErrorData> {
-        self.fetch_docs_inner(p).await.map_err(internal)
+        self.fetch_docs_inner(p).await.map_or_else(|e| Ok(format_diagnostic(e)), Ok)
     }
 }
 
@@ -466,15 +466,29 @@ impl ServerHandler for LibrarianServer {
     }
 }
 
-/// Convert an anyhow error into a JSON-RPC ErrorData. We use `invalid_params`
-/// (code -32602) for nearly all our errors because:
-///   - Most are user/agent input failures (bad token, empty manifest, unknown
-///     server, etc.) — that's the semantically correct code.
-///   - Some MCP clients (Claude Desktop observed) display a generic
-///     "Tool execution failed" for `internal_error` (-32603) and suppress
-///     the message, but surface the message for `invalid_params`. Choosing
-///     the right code is the difference between actionable feedback and
-///     a dead-end error.
+/// Render an `anyhow::Error` as the text content of a successful tool
+/// response. The agent reads it as the call's output and self-corrects.
+///
+/// Why not return a JSON-RPC error instead: every realistic failure in this
+/// codebase is a user-correctable validation problem (bad token, misplaced
+/// gotchas, unknown server, SSRF-blocked URL, expired propose, etc.), and
+/// multiple MCP client harnesses have been observed to swallow the error
+/// `message` field — surfacing only a generic "Tool execution failed"
+/// without the diagnostic. Returning the diagnostic as text content means
+/// the message ALWAYS reaches the agent, regardless of client behavior.
+///
+/// Every `anyhow::bail!()` in this crate starts its message with "Error: ".
+/// That prefix is the signal to the agent that the response is a corrective
+/// message, not a normal one. Agents can pattern-match on it.
+///
+/// `internal()` below is kept for any genuinely-internal error path that
+/// should escalate at the JSON-RPC layer — but no such path currently
+/// exists in the tool surface.
+fn format_diagnostic(err: anyhow::Error) -> String {
+    format!("{err:#}")
+}
+
+#[allow(dead_code)]
 fn internal(err: anyhow::Error) -> ErrorData {
     ErrorData::invalid_params(format!("{err:#}"), None)
 }
@@ -2019,6 +2033,47 @@ summary = "minimal"
         assert!(preview.contains("Workflows (0):"));
         assert!(preview.contains("Topics (0):"));
         assert!(preview.contains("Gotchas: 0 entries"));
+    }
+
+    #[test]
+    fn tool_methods_return_diagnostic_as_content_not_error() {
+        // Regression guard: validation failures must surface as Ok(content)
+        // so MCP clients that swallow JSON-RPC error.message fields still
+        // see the diagnostic. The "Error:" prefix on bail!() messages is the
+        // signal to the agent.
+        use rmcp::handler::server::wrapper::Parameters;
+        let (_tmp, paths) = test_paths();
+        let server = LibrarianServer::new(paths);
+
+        // Bad input: gotchas misplaced under [meta]. The bail!() in
+        // manifest_write_inner produces "Error: `gotchas` key was misplaced..."
+        // The tool method must convert this to Ok(content) so the harness
+        // displays it.
+        let bad = ManifestWriteParams {
+            server: "demo".into(),
+            manifest_toml: Some(
+                "[meta]\ncategory = \"x\"\n\ngotchas = [\"lost\"]\n".into(),
+            ),
+            manifest: None,
+            confirm_token: None,
+            overwrite: false,
+        };
+        let response =
+            tokio::runtime::Runtime::new().unwrap().block_on(async move {
+                server.manifest_write(Parameters(bad)).await
+            });
+        match response {
+            Ok(content) => {
+                assert!(
+                    content.starts_with("Error:"),
+                    "diagnostic should be prefixed with `Error:`, got: {content}"
+                );
+                assert!(content.contains("misplaced"), "should explain the failure: {content}");
+            }
+            Err(e) => panic!(
+                "validation failure must be returned as Ok(content), not Err: {e:?}"
+            ),
+        }
     }
 
     #[test]

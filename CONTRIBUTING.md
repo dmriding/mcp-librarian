@@ -19,13 +19,14 @@ cargo build --release                       # binary at target/release/mcp-libra
 
 A PR is ready when all three pass. CI is the same.
 
-For interactive testing against a live MCP client:
+For interactive testing against a live MCP client, the typical loop is:
 
-```powershell
-.\scripts\deploy.bat    # kill running, build release, copy to C:\Tools\mcp-librarian, refresh, list
-```
+1. Stop the running MCP server process (the client's child process for `mcp-librarian`)
+2. `cargo build --release`
+3. Copy `target/release/mcp-librarian.exe` to wherever your client config points
+4. Restart your MCP client (Claude Code / Claude Desktop / Codex) so it spawns the new binary
 
-Restart your MCP client (Claude Code / Claude Desktop / Codex) after deploy so it spawns the new binary.
+A scripted version of this lives outside the repo since deploy paths are user-specific.
 
 ---
 
@@ -48,7 +49,7 @@ tests/integration.rs  shared-fixture integration tests (~65)
                       (unit tests live inline #[cfg(test)] in their respective src/ files)
 ```
 
-Read [`docs/plan.md`](docs/plan.md) for the design rationale if it's still in your checkout (the `docs/` folder is gitignored — these are author notes, not user docs). User-facing docs live in this repo root: [README](README.md), [CHANGELOG](CHANGELOG.md), [SECURITY](SECURITY.md).
+User-facing docs live in this repo root: [README](README.md), [CHANGELOG](CHANGELOG.md), [SECURITY](SECURITY.md), and this file. Design rationale and the running tech-debt notebook are author-private and don't ship in the repo.
 
 ---
 
@@ -99,6 +100,22 @@ Every destructive write is gated with a propose/commit token that pins the exact
 If you find yourself writing "silent fallback" or "default to empty when unclear", stop. The librarian's design rule is **loud rejection > silent acceptance**. LLMs can't observe a silent error, so they can't learn from it. See the TOML misplaced-`gotchas` defense in `manifest_write_inner` as the canonical example — three layers of "this is wrong and here's where" rather than one layer of "we made it work somehow."
 
 If you must accept the input, *also* tell the agent what was unexpected (echo the recorded value, or surface a `(none)` count) so they can verify.
+
+### Diagnostics ride in the response content, not JSON-RPC error fields
+
+Tool methods return `Ok(content)` even on validation failures. The diagnostic text (prefixed `Error: ...`) sits in the response body. **Don't return `Err(ErrorData)` from a tool method for a user-correctable failure.**
+
+Why: multiple MCP client harnesses have been observed to swallow JSON-RPC `error.message` fields and display only "Tool execution failed" — eating the diagnostic. Returning content guarantees the message reaches the agent. The `Error:` prefix on every `anyhow::bail!()` message is the signal to the agent that this is a corrective response.
+
+The pattern in every tool method:
+
+```rust
+async fn list(&self, Parameters(p): Parameters<ListParams>) -> Result<String, ErrorData> {
+    self.list_inner(p).map_or_else(|e| Ok(format_diagnostic(e)), Ok)
+}
+```
+
+`format_diagnostic` lives in `src/server.rs`. `internal()` (kept for genuinely-internal errors that should escalate at the JSON-RPC layer) is currently unused — there are no such paths in the tool surface.
 
 ### Atomic writes, never partial state
 
