@@ -1182,19 +1182,37 @@ impl LibrarianServer {
                  Action: pick one. `manifest_toml` accepts a single TOML string and is the \
                  recommended path for non-trivial content."
             ),
-            (Some(toml_str), None) => toml::from_str::<Manifest>(toml_str).map_err(|e| {
-                anyhow::anyhow!(
-                    "Error: failed to parse `manifest_toml`: {e}. \
-                     Action: TOML errors include line/col — fix the syntax and retry. \
-                     Common pitfalls: \
-                     (1) Root-level fields like `gotchas = [...]` MUST appear BEFORE any `[section]` or `[[section]]` header. \
-                         Otherwise they get attached to the previous table. \
-                     (2) Use `\"\"\"...\"\"\"` triple-quoted blocks for multi-line workflow/topic bodies — \
-                         no escape mania, raw newlines OK. \
-                     (3) `[[workflows]]`, `[[topics]]`, `[[tool_categories]]` use DOUBLE brackets (array-of-tables). \
-                     (4) `gotchas` is a string array: `gotchas = [\"item 1\", \"item 2\"]`."
-                )
-            })?,
+            (Some(toml_str), None) => {
+                let manifest = toml::from_str::<Manifest>(toml_str).map_err(|e| {
+                    anyhow::anyhow!(
+                        "Error: failed to parse `manifest_toml`: {e}. \
+                         Action: TOML errors include line/col — fix the syntax and retry. \
+                         Common pitfalls: \
+                         (1) Root-level fields like `gotchas = [...]` MUST appear BEFORE any `[section]` or `[[section]]` header. \
+                             Otherwise they get attached to the previous table. \
+                         (2) Use `\"\"\"...\"\"\"` triple-quoted blocks for multi-line workflow/topic bodies — \
+                             no escape mania, raw newlines OK. \
+                         (3) `[[workflows]]`, `[[topics]]`, `[[tool_categories]]` use DOUBLE brackets (array-of-tables). \
+                         (4) `gotchas` is a string array: `gotchas = [\"item 1\", \"item 2\"]`."
+                    )
+                })?;
+                // Catch the silent-data-loss footgun: the TOML parsed cleanly,
+                // but a `gotchas` key was misplaced under a sub-table and got
+                // scoped there instead of root. The struct field is empty but
+                // the source contained the data — silently dropping it would
+                // commit an incomplete manifest. Reject loudly.
+                if let Some(misplaced) = detect_misplaced_gotchas(toml_str) {
+                    anyhow::bail!(
+                        "Error: `gotchas` key was misplaced in your TOML and got silently dropped \
+                         by TOML's table-scoping rules. {misplaced} \
+                         Action: move the `gotchas = [...]` array to BEFORE the first `[section]` \
+                         or `[[section]]` header in your TOML. Root-level keys must appear before \
+                         any table header. See `librarian_help(\"librarian\", \"manifest_schema\")` \
+                         for the canonical ordering."
+                    );
+                }
+                manifest
+            }
             (None, Some(m)) => m,
             (None, None) => anyhow::bail!(
                 "Error: must provide either `manifest_toml` (preferred) or `manifest`. \
@@ -1592,6 +1610,51 @@ fn seed_batch_fingerprint(items: &[SeedParams]) -> String {
     serde_json::to_string(items).unwrap_or_default()
 }
 
+/// Scan a raw TOML string for `gotchas` keys that landed inside a sub-table or
+/// array-of-tables element instead of at the document root. Returns a
+/// descriptive message naming the offending parent (e.g. "found inside [meta]"
+/// or "found inside [[topics]] item 2"), or None if there's nothing misplaced.
+///
+/// Background: in TOML, once a `[section]` or `[[section]]` header opens, every
+/// subsequent key belongs to that section until another header arrives. There's
+/// no way to "close" a section and return to root. So writing `gotchas = [...]`
+/// after `[meta]` silently scopes the array to the meta table — and our
+/// `Manifest` struct expects gotchas at root, so it ends up as an empty Vec
+/// with no parse error. This detector is the loud-failure version of that
+/// silent acceptance.
+fn detect_misplaced_gotchas(toml_str: &str) -> Option<String> {
+    let value: toml::Value = toml::from_str(toml_str).ok()?;
+    let toml::Value::Table(root) = value else {
+        return None;
+    };
+    let mut found: Vec<String> = Vec::new();
+    for (key, sub) in &root {
+        if key == "gotchas" {
+            continue; // correctly placed at root
+        }
+        match sub {
+            toml::Value::Table(t) if t.contains_key("gotchas") => {
+                found.push(format!("found inside `[{key}]`"));
+            }
+            toml::Value::Array(arr) => {
+                for (i, item) in arr.iter().enumerate() {
+                    if let toml::Value::Table(t) = item
+                        && t.contains_key("gotchas")
+                    {
+                        found.push(format!("found inside `[[{key}]]` item {i}"));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if found.is_empty() {
+        None
+    } else {
+        Some(found.join("; "))
+    }
+}
+
 /// Conservative ASCII normalization for content that flows verbatim into a
 /// propose-preview response. Claude Desktop has been observed to hang on
 /// previews containing em-dashes (U+2014) and en-dashes (U+2013) embedded in
@@ -1811,6 +1874,151 @@ mod tests {
                 allow_duplicate: false,
             })
             .unwrap();
+    }
+
+    #[test]
+    fn detect_misplaced_gotchas_catches_under_meta() {
+        let bad = r#"
+[meta]
+category = "comms"
+
+gotchas = ["this gets scoped to meta"]
+"#;
+        let found = detect_misplaced_gotchas(bad);
+        assert!(found.is_some(), "should detect gotchas under [meta]");
+        assert!(found.unwrap().contains("[meta]"));
+    }
+
+    #[test]
+    fn detect_misplaced_gotchas_catches_under_array_of_tables() {
+        let bad = r#"
+[[topics]]
+name = "auth"
+title = "Auth"
+body = "..."
+
+gotchas = ["this gets scoped to topics[0]"]
+"#;
+        let found = detect_misplaced_gotchas(bad);
+        assert!(found.is_some(), "should detect gotchas under [[topics]]");
+        let msg = found.unwrap();
+        assert!(msg.contains("[[topics]]"));
+        assert!(msg.contains("item 0"));
+    }
+
+    #[test]
+    fn detect_misplaced_gotchas_passes_correct_ordering() {
+        let good = r#"
+gotchas = ["item 1", "item 2"]
+
+[meta]
+category = "comms"
+
+[[topics]]
+name = "auth"
+title = "Auth"
+body = "..."
+"#;
+        assert!(
+            detect_misplaced_gotchas(good).is_none(),
+            "correctly placed gotchas should not be flagged"
+        );
+    }
+
+    #[test]
+    fn detect_misplaced_gotchas_passes_when_absent() {
+        let no_gotchas = r#"
+[meta]
+category = "comms"
+summary = "..."
+
+[[topics]]
+name = "auth"
+title = "Auth"
+body = "..."
+"#;
+        assert!(detect_misplaced_gotchas(no_gotchas).is_none());
+    }
+
+    #[test]
+    fn manifest_write_rejects_misplaced_gotchas() {
+        // End-to-end: the agent submits TOML with gotchas under [meta]. We
+        // catch it before issuing a token. The user is told what's wrong.
+        let (_tmp, paths) = test_paths();
+        let server = LibrarianServer::new(paths);
+        let bad_toml = r#"[meta]
+category = "comms"
+summary = "test"
+
+gotchas = ["this is lost"]
+"#;
+        let err = server
+            .manifest_write_inner(ManifestWriteParams {
+                server: "demo".into(),
+                manifest_toml: Some(bad_toml.into()),
+                manifest: None,
+                confirm_token: None,
+                overwrite: false,
+            })
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("misplaced") || msg.contains("silently dropped"),
+            "should mention the silent-drop failure mode: {msg}"
+        );
+        assert!(msg.contains("[meta]"), "should name the offending parent: {msg}");
+        assert!(msg.contains("manifest_schema"), "should point at the schema topic");
+    }
+
+    #[test]
+    fn manifest_write_accepts_correct_ordering() {
+        let (_tmp, paths) = test_paths();
+        let server = LibrarianServer::new(paths);
+        let good_toml = r#"gotchas = ["fine"]
+
+[meta]
+category = "comms"
+summary = "test"
+"#;
+        // Propose mode — should succeed and return a preview
+        let preview = server
+            .manifest_write_inner(ManifestWriteParams {
+                server: "demo".into(),
+                manifest_toml: Some(good_toml.into()),
+                manifest: None,
+                confirm_token: None,
+                overwrite: false,
+            })
+            .unwrap();
+        assert!(preview.contains("MANIFEST WRITE"));
+        assert!(preview.contains("Gotchas: 1 entries"));
+    }
+
+    #[test]
+    fn manifest_preview_shows_zero_counts_for_empty_sections() {
+        // The agent could authour a manifest with only meta, no other content.
+        // The preview must show "Gotchas: 0 entries" / "Workflows (0):" etc.
+        // so an unexpected zero is visible at a glance.
+        let (_tmp, paths) = test_paths();
+        let server = LibrarianServer::new(paths);
+        let toml = r#"[meta]
+category = "comms"
+summary = "minimal"
+"#;
+        let preview = server
+            .manifest_write_inner(ManifestWriteParams {
+                server: "demo".into(),
+                manifest_toml: Some(toml.into()),
+                manifest: None,
+                confirm_token: None,
+                overwrite: false,
+            })
+            .unwrap();
+        // Every section should have a count line, even when zero.
+        assert!(preview.contains("Tool categories (0):"));
+        assert!(preview.contains("Workflows (0):"));
+        assert!(preview.contains("Topics (0):"));
+        assert!(preview.contains("Gotchas: 0 entries"));
     }
 
     #[test]
