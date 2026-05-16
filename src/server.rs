@@ -7,7 +7,7 @@ use rmcp::model::{ServerCapabilities, ServerInfo};
 use rmcp::service::RequestContext;
 use rmcp::{RoleServer, ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
@@ -41,6 +41,9 @@ enum PendingAction {
     Write { fingerprint: String, overwrite: bool },
     /// Swap current ↔ backup for the named server.
     Restore,
+    /// The user approved a specific list of servers to bulk-seed.
+    /// Fingerprint pins the exact `Vec<SeedParams>` content.
+    SeedBatch { fingerprint: String },
 }
 
 #[derive(Clone)]
@@ -143,7 +146,7 @@ pub struct NoteParams {
     pub allow_duplicate: bool,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct SeedParams {
     pub server: String,
     /// One-line summary that shows up in `librarian_list`.
@@ -156,7 +159,7 @@ pub struct SeedParams {
     pub tools: Vec<SeedTool>,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct SeedTool {
     pub name: String,
     #[serde(default)]
@@ -168,6 +171,18 @@ pub struct SeedTool {
     /// Optional map of argument names → short hints.
     #[serde(default)]
     pub properties: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct SeedBatchParams {
+    /// One entry per server to seed. Same shape as `librarian_seed_playbook`.
+    /// Designed for first-install onboarding: many hosted/cloud servers at once
+    /// under a single user approval.
+    pub servers: Vec<SeedParams>,
+    /// Required ONLY on the commit call. Get it from a prior propose call.
+    /// Omit (or null) to perform a propose call — returns a preview + token.
+    #[serde(default)]
+    pub confirm_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema, Default)]
@@ -288,11 +303,34 @@ impl LibrarianServer {
 
     #[tool(
         name = "librarian_seed_playbook",
-        description = "Bootstrap a server entry from the tool list you already see in your context. \
-                       Use this for remote/cloud servers the librarian can't probe directly."
+        description = "Bootstrap a single server entry from the tool list you already see in your context. \
+                       Use this for remote/cloud servers the librarian can't probe directly. \
+                       For first-install onboarding of MANY hosted servers at once, prefer \
+                       `librarian_seed_batch` — one user approval covers the whole batch."
     )]
     async fn seed(&self, Parameters(p): Parameters<SeedParams>) -> Result<String, ErrorData> {
         self.seed_inner(p).map_err(internal)
+    }
+
+    #[tool(
+        name = "librarian_seed_batch",
+        description = "Bulk-seed many hosted/cloud server entries in one approved transaction. \
+                       Designed for first-install onboarding where the agent has identified every \
+                       hosted MCP server visible in its deferred-tools reminder. \
+                       TWO-STEP REQUIRED: \
+                       (1) Call WITHOUT confirm_token to receive a structured preview (every \
+                       server, its category, its tool count, plus a warning if any names \
+                       collide with existing entries) + a confirm_token. \
+                       (2) Show the preview to the user and ask them to type 'I agree' or 'yes'. \
+                       (3) Re-call with the SAME `servers` list plus confirm_token. \
+                       All seeds land atomically under one write lock. Tokens expire in 5 \
+                       minutes and are single-use."
+    )]
+    async fn seed_batch(
+        &self,
+        Parameters(p): Parameters<SeedBatchParams>,
+    ) -> Result<String, ErrorData> {
+        self.seed_batch_inner(p).map_err(internal)
     }
 
     #[tool(
@@ -680,6 +718,185 @@ impl LibrarianServer {
         Ok(format!("seeded `{}` with {tool_count} tools", server_name))
     }
 
+    fn seed_batch_inner(&self, p: SeedBatchParams) -> Result<String> {
+        // Validate up front: non-empty, no name collisions within the batch,
+        // every server name passes the path-traversal validator.
+        if p.servers.is_empty() {
+            anyhow::bail!(
+                "Error: `servers` is empty. Action: pass at least one server entry. \
+                 For zero servers, just don't call this tool."
+            );
+        }
+        let mut seen_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for item in &p.servers {
+            validate_server_name(&item.server)?;
+            if !seen_names.insert(item.server.as_str()) {
+                anyhow::bail!(
+                    "Error: server name `{}` appears more than once in the batch. \
+                     Action: each server may appear at most once. Deduplicate the list.",
+                    item.server,
+                );
+            }
+        }
+
+        let fingerprint = seed_batch_fingerprint(&p.servers);
+
+        match p.confirm_token {
+            // ----- Propose -----
+            None => {
+                // Load the current index to identify collisions for the preview.
+                let index = Index::load(&self.paths.cache_file)?;
+                let collisions: Vec<&str> = p
+                    .servers
+                    .iter()
+                    .filter(|s| index.servers.contains_key(&s.server))
+                    .map(|s| s.server.as_str())
+                    .collect();
+
+                let pending = PendingWrite {
+                    server: "(batch)".to_string(),
+                    action: PendingAction::SeedBatch { fingerprint },
+                    expires_at: Utc::now() + chrono::Duration::seconds(PENDING_WRITE_TTL_SECS),
+                };
+                let token = self.issue_token(pending);
+
+                let mut preview = String::new();
+                preview.push_str("## SEED BATCH — PREVIEW (NOT YET COMMITTED)\n\n");
+                let _ = writeln!(
+                    preview,
+                    "The agent proposes to add the following {} server{} to the librarian index:\n",
+                    p.servers.len(),
+                    if p.servers.len() == 1 { "" } else { "s" },
+                );
+                let mut total_tools = 0usize;
+                for item in &p.servers {
+                    total_tools += item.tools.len();
+                    let _ = writeln!(
+                        preview,
+                        "  - {} ({}) — {} tool{}",
+                        item.server,
+                        item.category.as_deref().unwrap_or("uncategorized"),
+                        item.tools.len(),
+                        if item.tools.len() == 1 { "" } else { "s" },
+                    );
+                }
+                let _ = writeln!(
+                    preview,
+                    "\nTotal: {} server{}, {total_tools} tool{}.",
+                    p.servers.len(),
+                    if p.servers.len() == 1 { "" } else { "s" },
+                    if total_tools == 1 { "" } else { "s" },
+                );
+
+                if collisions.is_empty() {
+                    preview.push_str("\nNo existing entries will be overwritten.\n");
+                } else {
+                    preview.push_str("\n**Existing entries that will be OVERWRITTEN:**\n");
+                    for name in &collisions {
+                        let _ = writeln!(preview, "  - {name}");
+                    }
+                    preview.push_str(
+                        "\nIf any of these were curated, abandon this batch and seed the new ones \
+                         individually with `librarian_seed_playbook` instead.\n",
+                    );
+                }
+
+                let _ = writeln!(
+                    preview,
+                    "\n---\n\
+                     **REVIEW REQUIRED.** Show the preview above to the user. \
+                     Ask them to type **\"I agree\"** or **\"yes\"** to commit. \
+                     Once they approve, re-call `librarian_seed_batch` with:\n\
+                     - the **same** `servers` list (any difference will reject),\n\
+                     - `confirm_token=\"{token}\"`.\n\n\
+                     The token expires in {} minutes and is single-use. \
+                     Do NOT commit on your own initiative — wait for explicit user approval.",
+                    PENDING_WRITE_TTL_SECS / 60,
+                );
+                Ok(preview)
+            }
+            // ----- Commit -----
+            Some(token) => {
+                let pending = self.consume_token(&token).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Error: `confirm_token` is not recognized, already used, or expired. \
+                         Action: re-call `librarian_seed_batch` without `confirm_token` to get \
+                         a fresh preview + token. Tokens are single-use and expire after {} minutes.",
+                        PENDING_WRITE_TTL_SECS / 60,
+                    )
+                })?;
+                let token_fp = match &pending.action {
+                    PendingAction::SeedBatch { fingerprint } => fingerprint,
+                    _ => anyhow::bail!(
+                        "Error: `confirm_token` was issued for a different action (not a seed batch). \
+                         Action: re-call `librarian_seed_batch` without `confirm_token` to get a \
+                         batch-specific token."
+                    ),
+                };
+                if &fingerprint != token_fp {
+                    anyhow::bail!(
+                        "Error: batch content differs from what was proposed and approved. \
+                         The user approved a specific list of servers; you are now trying to \
+                         commit a different list. Action: re-call without `confirm_token` with \
+                         the CURRENT list to get a fresh preview + token, then have the user \
+                         approve the new version."
+                    );
+                }
+
+                let count = p.servers.len();
+                let total_tools: usize = p.servers.iter().map(|s| s.tools.len()).sum();
+
+                // All seeds happen under a single write lock so the index file
+                // is updated atomically. Partial failure of any one entry
+                // shouldn't be possible since seed is in-memory mutation
+                // followed by one save.
+                lockfile::with_write_lock(&self.paths, || {
+                    let mut index = Index::load(&self.paths.cache_file)?;
+                    let now = Utc::now();
+                    for item in &p.servers {
+                        let tools: Vec<IndexedTool> = item
+                            .tools
+                            .iter()
+                            .map(|t| IndexedTool {
+                                name: t.name.clone(),
+                                description: t.description.clone(),
+                                arg_summary: if t.required.is_empty()
+                                    && t.properties.is_empty()
+                                {
+                                    None
+                                } else {
+                                    Some(ArgSummary {
+                                        required: t.required.clone(),
+                                        properties: t.properties.clone(),
+                                    })
+                                },
+                            })
+                            .collect();
+                        let entry = ServerEntry {
+                            name: item.server.clone(),
+                            transport_descriptor: "seeded by agent (batch)".to_string(),
+                            probeable: false,
+                            probe_status: ProbeStatus::Seeded,
+                            indexed_at: now,
+                            tools,
+                            summary: item.summary.clone(),
+                            category: item.category.clone(),
+                        };
+                        index.servers.insert(item.server.clone(), entry);
+                    }
+                    index.save(&self.paths.cache_file)?;
+                    Ok(())
+                })?;
+
+                Ok(format!(
+                    "Seeded {count} server{} ({total_tools} tool{}) in one batch.",
+                    if count == 1 { "" } else { "s" },
+                    if total_tools == 1 { "" } else { "s" },
+                ))
+            }
+        }
+    }
+
     async fn refresh_inner(&self, p: RefreshParams) -> Result<String> {
         if let Some(name) = p.server.as_deref() {
             validate_server_name(name)?;
@@ -890,8 +1107,8 @@ impl LibrarianServer {
                 }
                 let (token_fingerprint, token_overwrite) = match &pending.action {
                     PendingAction::Write { fingerprint, overwrite } => (fingerprint, *overwrite),
-                    PendingAction::Restore => anyhow::bail!(
-                        "Error: `confirm_token` was issued for a restore call, not a write. \
+                    PendingAction::Restore | PendingAction::SeedBatch { .. } => anyhow::bail!(
+                        "Error: `confirm_token` was issued for a different action (not a manifest write). \
                          Action: re-call `librarian_manifest_write` without `confirm_token` to \
                          get a write-specific token."
                     ),
@@ -1191,6 +1408,13 @@ const STOP_WORDS: &[&str] = &[
     "can", "could", "should", "would", "will",
 ];
 
+/// Canonical fingerprint of a seed batch — used to verify that a commit-mode
+/// call carries the exact list the user approved. Same pattern as
+/// `manifest_fingerprint`: serialize to JSON and compare strings.
+fn seed_batch_fingerprint(items: &[SeedParams]) -> String {
+    serde_json::to_string(items).unwrap_or_default()
+}
+
 /// Normalize a note claim for duplicate detection. Collapses internal
 /// whitespace, trims, and lowercases. Two claims with the same prose
 /// content but different casing or stray double-spaces compare equal.
@@ -1387,6 +1611,218 @@ mod tests {
                 allow_duplicate: false,
             })
             .unwrap();
+    }
+
+    #[test]
+    fn seed_batch_propose_returns_preview_and_token() {
+        let (_tmp, paths) = test_paths();
+        let server = LibrarianServer::new(paths);
+        let params = SeedBatchParams {
+            servers: vec![
+                SeedParams {
+                    server: "claude.ai_Foo".into(),
+                    summary: Some("Foo MCP".into()),
+                    category: Some("comms".into()),
+                    tools: vec![SeedTool {
+                        name: "foo_send".into(),
+                        description: "send a foo".into(),
+                        required: vec![],
+                        properties: Default::default(),
+                    }],
+                },
+                SeedParams {
+                    server: "claude.ai_Bar".into(),
+                    summary: Some("Bar MCP".into()),
+                    category: Some("knowledge".into()),
+                    tools: vec![],
+                },
+            ],
+            confirm_token: None,
+        };
+        let preview = server.seed_batch_inner(params).unwrap();
+        assert!(preview.contains("SEED BATCH"));
+        assert!(preview.contains("claude.ai_Foo"));
+        assert!(preview.contains("claude.ai_Bar"));
+        assert!(preview.contains("Total: 2 servers"));
+        assert!(preview.contains("confirm_token="));
+    }
+
+    fn extract_token(preview: &str) -> String {
+        let line = preview
+            .lines()
+            .find(|l| l.contains("confirm_token=\""))
+            .expect("token line");
+        let start = line.find("confirm_token=\"").unwrap() + 15;
+        let end = line[start..].find('"').unwrap() + start;
+        line[start..end].to_string()
+    }
+
+    #[test]
+    fn seed_batch_commit_persists_all_servers() {
+        let (_tmp, paths) = test_paths();
+        let server = LibrarianServer::new(paths.clone());
+        let payload = vec![
+            SeedParams {
+                server: "claude.ai_One".into(),
+                summary: Some("One".into()),
+                category: Some("comms".into()),
+                tools: vec![SeedTool {
+                    name: "x_y".into(),
+                    description: "".into(),
+                    required: vec![],
+                    properties: Default::default(),
+                }],
+            },
+            SeedParams {
+                server: "claude.ai_Two".into(),
+                summary: Some("Two".into()),
+                category: Some("knowledge".into()),
+                tools: vec![],
+            },
+        ];
+        let propose = server
+            .seed_batch_inner(SeedBatchParams {
+                servers: payload.clone(),
+                confirm_token: None,
+            })
+            .unwrap();
+        let token = extract_token(&propose);
+
+        let commit_msg = server
+            .seed_batch_inner(SeedBatchParams {
+                servers: payload,
+                confirm_token: Some(token),
+            })
+            .unwrap();
+        assert!(commit_msg.contains("Seeded 2 servers"));
+
+        let index = Index::load(&paths.cache_file).unwrap();
+        assert!(index.servers.contains_key("claude.ai_One"));
+        assert!(index.servers.contains_key("claude.ai_Two"));
+    }
+
+    #[test]
+    fn seed_batch_rejects_tampered_content() {
+        let (_tmp, paths) = test_paths();
+        let server = LibrarianServer::new(paths);
+        let original = vec![SeedParams {
+            server: "claude.ai_X".into(),
+            summary: Some("X".into()),
+            category: None,
+            tools: vec![],
+        }];
+        let propose = server
+            .seed_batch_inner(SeedBatchParams {
+                servers: original,
+                confirm_token: None,
+            })
+            .unwrap();
+        let token = extract_token(&propose);
+
+        // Submit a DIFFERENT list with the same token — fingerprint should reject.
+        let tampered = vec![SeedParams {
+            server: "claude.ai_Different".into(),
+            summary: Some("Different".into()),
+            category: None,
+            tools: vec![],
+        }];
+        let err = server
+            .seed_batch_inner(SeedBatchParams {
+                servers: tampered,
+                confirm_token: Some(token),
+            })
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("differs from what was proposed"));
+    }
+
+    #[test]
+    fn seed_batch_rejects_duplicate_names_within_batch() {
+        let (_tmp, paths) = test_paths();
+        let server = LibrarianServer::new(paths);
+        let err = server
+            .seed_batch_inner(SeedBatchParams {
+                servers: vec![
+                    SeedParams {
+                        server: "dup".into(),
+                        summary: None,
+                        category: None,
+                        tools: vec![],
+                    },
+                    SeedParams {
+                        server: "dup".into(),
+                        summary: None,
+                        category: None,
+                        tools: vec![],
+                    },
+                ],
+                confirm_token: None,
+            })
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("appears more than once"));
+    }
+
+    #[test]
+    fn seed_batch_rejects_path_traversal_in_any_item() {
+        let (_tmp, paths) = test_paths();
+        let server = LibrarianServer::new(paths);
+        let err = server
+            .seed_batch_inner(SeedBatchParams {
+                servers: vec![
+                    SeedParams {
+                        server: "valid".into(),
+                        summary: None,
+                        category: None,
+                        tools: vec![],
+                    },
+                    SeedParams {
+                        server: "../escape".into(),
+                        summary: None,
+                        category: None,
+                        tools: vec![],
+                    },
+                ],
+                confirm_token: None,
+            })
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("starts with `.`") || msg.contains("disallowed character"));
+    }
+
+    #[test]
+    fn seed_batch_propose_flags_collisions_with_existing_entries() {
+        let (_tmp, paths) = test_paths();
+        let server = LibrarianServer::new(paths.clone());
+        // Pre-seed an existing entry.
+        server
+            .seed_inner(SeedParams {
+                server: "claude.ai_Existing".into(),
+                summary: Some("existing".into()),
+                category: Some("comms".into()),
+                tools: vec![],
+            })
+            .unwrap();
+        // Now propose a batch that collides with it.
+        let preview = server
+            .seed_batch_inner(SeedBatchParams {
+                servers: vec![
+                    SeedParams {
+                        server: "claude.ai_Existing".into(),
+                        summary: Some("new content".into()),
+                        category: Some("comms".into()),
+                        tools: vec![],
+                    },
+                    SeedParams {
+                        server: "claude.ai_New".into(),
+                        summary: Some("brand new".into()),
+                        category: None,
+                        tools: vec![],
+                    },
+                ],
+                confirm_token: None,
+            })
+            .unwrap();
+        assert!(preview.contains("will be OVERWRITTEN"));
+        assert!(preview.contains("claude.ai_Existing"));
     }
 
     #[test]

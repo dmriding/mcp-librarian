@@ -675,7 +675,7 @@ pub fn render_self() -> String {
     );
     s.push_str("## Tool Categories\n\n");
     s.push_str("- **Read**: librarian_list, librarian_help, librarian_search, librarian_manifest_diff\n");
-    s.push_str("- **Write**: librarian_note, librarian_seed_playbook, librarian_manifest_write, librarian_manifest_restore\n");
+    s.push_str("- **Write**: librarian_note, librarian_seed_playbook, librarian_seed_batch, librarian_manifest_write, librarian_manifest_restore\n");
     s.push_str("- **Fetch**: librarian_fetch_docs (read public vendor docs to bootstrap hosted-server playbooks)\n");
     s.push_str("- **Maintenance**: librarian_refresh\n");
     s.push_str("- **Bootstrap**: librarian_onboarding (one-shot prompt for first-install setup)\n\n");
@@ -764,22 +764,41 @@ pub fn render_onboarding() -> String {
          probe by spawning — those need manual seeding.\n\n",
     );
 
-    s.push_str("## Step 3 — seed each missing hosted server\n\n");
+    s.push_str("## Step 3 — seed every missing hosted server in ONE approved batch\n\n");
     s.push_str(
-        "For every hosted/cloud MCP server visible in your deferred-tools reminder that didn't \
-         show up in `librarian_list`, call:\n\n",
+        "Don't make N separate seed calls. Build a single batch payload with every hosted/cloud \
+         MCP server visible in your deferred-tools reminder that didn't show up in \
+         `librarian_list`, then submit it for one user approval:\n\n",
     );
-    s.push_str("```\nlibrarian_seed_playbook(\n");
-    s.push_str("    server=\"<the exact name as it appears in tool prefixes, e.g. claude.ai_Slack>\",\n");
-    s.push_str("    summary=\"<one-sentence description of what this server does>\",\n");
-    s.push_str("    category=\"<bucket: comms | design | productivity | knowledge | crm |\n");
-    s.push_str("               prospecting | storage | developer-tools | meta | data | utility>\",\n");
-    s.push_str("    tools=[\n");
-    s.push_str("        {\"name\": \"tool_name_1\", \"description\": \"one-line summary\"},\n");
-    s.push_str("        {\"name\": \"tool_name_2\", \"description\": \"...\"},\n");
+    s.push_str("```\nlibrarian_seed_batch(\n");
+    s.push_str("    servers=[\n");
+    s.push_str("        {\n");
+    s.push_str("            \"server\": \"<exact name as in tool prefixes, e.g. claude.ai_Slack>\",\n");
+    s.push_str("            \"summary\": \"<one-sentence description>\",\n");
+    s.push_str("            \"category\": \"<bucket — see below>\",\n");
+    s.push_str("            \"tools\": [\n");
+    s.push_str("                {\"name\": \"tool_name_1\", \"description\": \"one-line summary\"},\n");
+    s.push_str("                {\"name\": \"tool_name_2\", \"description\": \"...\"}\n");
+    s.push_str("            ]\n");
+    s.push_str("        },\n");
+    s.push_str("        { ... next server ... },\n");
     s.push_str("        ...\n");
     s.push_str("    ]\n");
     s.push_str(")\n```\n\n");
+    s.push_str(
+        "The first call returns a structured preview (every server, category, tool count, plus a \
+         warning about any collisions with existing entries) and a `confirm_token`. \
+         **Show the preview to the user verbatim** and ask them to type \"I agree\" or \"yes\". \
+         Once they approve, re-call with the SAME `servers` list plus the `confirm_token` to commit.\n\n",
+    );
+    s.push_str(
+        "Category buckets: `comms` | `design` | `productivity` | `knowledge` | `crm` | \
+         `prospecting` | `storage` | `developer-tools` | `meta` | `data` | `utility`.\n\n",
+    );
+    s.push_str(
+        "For just one or two servers you discover later, use `librarian_seed_playbook` instead — \
+         single server, no batch overhead, no approval gate.\n\n",
+    );
 
     s.push_str("### Conventions\n\n");
     s.push_str(
