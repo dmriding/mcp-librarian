@@ -1158,6 +1158,18 @@ pub fn render_manifest_preview(
     out.push('\n');
 
     let _ = writeln!(out, "Gotchas: {} entries", manifest.gotchas.len());
+    // Soft nudge when zero — gotchas are typically the highest-signal section
+    // of a manifest (real-world usage patterns, footguns, env-var requirements).
+    // Make the absence visible, not just the count. Not a hard reject — some
+    // servers legitimately have nothing to flag. ASCII-only to keep this clear
+    // of Claude Desktop's preview-renderer hang triggers.
+    if manifest.gotchas.is_empty() {
+        out.push_str(
+            "*Note: no gotchas listed. Real-world usage patterns and footguns are \
+             typically the highest-signal part of a playbook. Consider adding 2-3 \
+             before committing.*\n",
+        );
+    }
     out.push('\n');
 
     out

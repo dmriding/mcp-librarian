@@ -4,7 +4,11 @@ All notable changes to this project will be documented here. Format follows [Kee
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+- Rewrote the rmcp server `instructions` string (surfaced to agents in session-init context by Claude Desktop / Claude Code / Codex) to open with directive framing: *"Orient before acting. Before calling any indexed MCP server's tools, call `librarian_help(server)`..."*. Closes the cold-start discoverability gap from the 2026-06-02 Claude Desktop feedback — the prior text was informational and left the orient-first behavior opt-in.
+
+### Added
+- `librarian_manifest_write` propose preview now surfaces a soft nudge when a manifest has zero gotchas: *"no gotchas listed. Real-world usage patterns and footguns are typically the highest-signal part of a playbook. Consider adding 2-3 before committing."* Not a hard reject — some servers legitimately have none. Mirrors the existing "always show `Gotchas: 0 entries`" discipline by making the absence's *cost* visible alongside its count.
 
 ## [0.1.0] - 2026-05-16
 
