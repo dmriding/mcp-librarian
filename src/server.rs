@@ -619,8 +619,16 @@ impl LibrarianServer {
                     playbook::load_manifest(&self.paths, &entry.name).ok().flatten()
                 });
             for tool in &entry.tools {
-                let aliases = collect_aliases_for_tool(manifest.as_ref(), &tool.name);
-                let score = rank(&q, &q_tokens, &tool.name, &tool.description, &aliases);
+                let phrases = collect_alias_phrases_for_tool(manifest.as_ref(), &tool.name);
+                let aliases_haystack = phrases.join(" ");
+                let mut score =
+                    rank(&q, &q_tokens, &tool.name, &tool.description, &aliases_haystack);
+                // Per-phrase bonus: a phrase whose meaningful tokens densely
+                // match the query is stronger signal than scattered token hits
+                // across the cat'd haystack. Closes the noisy-query gap from
+                // docs/round2.md where alias-only tools got squeezed below
+                // hosted *_search_* tools with one shared name token.
+                score += phrase_overlap_bonus(&phrases, &q);
                 if score > 0 {
                     hits.push((
                         entry.name.clone(),
@@ -1727,6 +1735,25 @@ fn is_meaningful_token(t: &str) -> bool {
     t.len() >= 3 && !STOP_WORDS.iter().any(|s| s.eq_ignore_ascii_case(t))
 }
 
+/// Stricter cousin of `is_meaningful_token` for ALIAS PHRASES. Keeps
+/// wh-words ("where", "what", "how") and action verbs ("find", "get",
+/// "locate", "show") because those are precisely the intent signals an
+/// author curates an alias around — filtering them via the full STOP_WORDS
+/// list strips the phrase to nothing. Drops only pure grammatical filler.
+fn is_meaningful_phrase_token(t: &str) -> bool {
+    if t.len() < 3 {
+        return false;
+    }
+    !matches!(
+        t.to_lowercase().as_str(),
+        "the" | "this" | "that" | "these" | "those"
+            | "and" | "but" | "for" | "with" | "from"
+            | "are" | "was" | "were" | "been"
+            | "has" | "had" | "have"
+            | "you" | "your" | "its"
+    )
+}
+
 /// Concatenate searchable fields from a manifest for free-text matching.
 fn manifest_haystack(m: &Manifest) -> String {
     let mut s = String::new();
@@ -1776,21 +1803,66 @@ fn manifest_haystack(m: &Manifest) -> String {
     s
 }
 
-/// Collect alias phrases attached to `tool_name` from a manifest, flattened
-/// into a single haystack string. Returns empty string if no manifest, no
-/// aliases for this tool, or the aliases entry has no phrases.
-fn collect_aliases_for_tool(manifest: Option<&Manifest>, tool_name: &str) -> String {
-    let Some(m) = manifest else { return String::new() };
-    let mut out = String::new();
+/// Collect alias phrases attached to `tool_name` from a manifest. Returned
+/// as `Vec<String>` (one entry per phrase) so callers can both iterate
+/// per-phrase for structured scoring (see `phrase_overlap_bonus`) and
+/// `.join(" ")` to recover the flat haystack the existing `rank()` expects.
+/// Returns an empty Vec if no manifest, no aliases for this tool, or the
+/// matching aliases entries have no phrases.
+fn collect_alias_phrases_for_tool(manifest: Option<&Manifest>, tool_name: &str) -> Vec<String> {
+    let Some(m) = manifest else { return Vec::new() };
+    let mut out: Vec<String> = Vec::new();
     for alias in &m.tool_aliases {
         if alias.tool == tool_name {
             for phrase in &alias.phrases {
-                out.push_str(phrase);
-                out.push(' ');
+                out.push(phrase.clone());
             }
         }
     }
     out
+}
+
+/// Phrase-level overlap bonus. Awarded on top of the haystack-level scoring
+/// in `rank()` so a phrase whose meaningful tokens densely match the query
+/// outranks tools that only share a single common token via their name.
+///
+/// A phrase must have ≥2 meaningful tokens AND at least 2 of them must
+/// appear in the query (≥50% overlap) for the bonus to fire. This is
+/// the right calibration for the failure documented in `docs/round2.md`:
+/// an alias phrase like `"where is X defined"` (meaningful tokens after
+/// stop-word/placeholder filtering: [`where`, `defined`]) fully matched
+/// against the query lifts the tool above unrelated single-name-token
+/// matches — without false-positive boosting on incidental single-token
+/// overlap, which the per-token `rank()` arm already weights at +15.
+///
+/// Each qualifying phrase contributes `matched_tokens * 20`, capped at +80
+/// per phrase so a single long phrase can't dominate; multiple qualifying
+/// phrases sum.
+fn phrase_overlap_bonus(phrases: &[String], query: &str) -> i64 {
+    let q_lower = query.to_lowercase();
+    let mut bonus: i64 = 0;
+    for phrase in phrases {
+        let phrase_lower = phrase.to_lowercase();
+        let phrase_tokens: Vec<&str> = phrase_lower
+            .split_whitespace()
+            .filter(|t| is_meaningful_phrase_token(t))
+            .collect();
+        if phrase_tokens.len() < 2 {
+            continue;
+        }
+        let matched: usize = phrase_tokens
+            .iter()
+            .filter(|t| q_lower.contains(*t))
+            .count();
+        if matched < 2 {
+            continue;
+        }
+        let fraction = matched as f32 / phrase_tokens.len() as f32;
+        if fraction >= 0.5 {
+            bonus += (matched as i64 * 20).min(80);
+        }
+    }
+    bonus
 }
 
 fn rank(
@@ -3157,6 +3229,133 @@ summary = "minimal"
             !result.contains("codeview /"),
             "alias attached to a non-existent tool must not surface unrelated tools:\n{result}"
         );
+    }
+
+    #[test]
+    fn phrase_overlap_bonus_fires_on_dense_match() {
+        // The outline alias set from docs/round2.md. After stop-word and
+        // short-token filtering: "where is X defined" -> [where, defined].
+        // Query "where is a function defined" contains both -> 2/2 -> +40.
+        // "find function" -> [find, function]; only "function" in query
+        // -> 1/2 -> below the matched>=2 floor -> 0.
+        let phrases = vec![
+            "find function".to_string(),
+            "locate definition".to_string(),
+            "where is X defined".to_string(),
+            "symbol lookup".to_string(),
+        ];
+        let bonus = phrase_overlap_bonus(&phrases, "where is a function defined");
+        assert_eq!(
+            bonus, 40,
+            "expected +40 from fully-matched 2-token phrase, got {bonus}"
+        );
+    }
+
+    #[test]
+    fn phrase_overlap_bonus_inert_on_zero_overlap() {
+        // No phrase token appears in the query -> 0 bonus. Guards against
+        // any tool with aliases getting a phantom boost on unrelated queries.
+        let phrases = vec!["find function".to_string(), "locate definition".to_string()];
+        let bonus = phrase_overlap_bonus(&phrases, "slack channel message");
+        assert_eq!(bonus, 0);
+    }
+
+    #[test]
+    fn phrase_overlap_bonus_below_matched_floor_is_inert() {
+        // A single matched token does NOT trigger the phrase bonus — that
+        // signal is already covered by the per-token alias arm in rank()
+        // at +15. The phrase bonus exists specifically for multi-token
+        // dense matches.
+        let phrases = vec!["find function".to_string()];
+        // "function" in query, "find" not -> 1/2 matched, fails matched>=2.
+        let bonus = phrase_overlap_bonus(&phrases, "what function does this serve");
+        assert_eq!(bonus, 0);
+    }
+
+    #[test]
+    fn phrase_overlap_bonus_scales_with_match_count() {
+        // 3-token phrase fully matched -> 3 * 20 = +60.
+        // Caps at +80 so no single phrase dominates the score budget.
+        let phrases = vec!["regex search files".to_string()];
+        let bonus = phrase_overlap_bonus(&phrases, "regex search files in repo");
+        assert_eq!(bonus, 60);
+    }
+
+    #[test]
+    fn search_outline_above_grep_in_pure_intent_query() {
+        // Tighter version of the docs/round2.md follow-up: when the query
+        // is pure intent (no "search"/"grep" lexical noise), outline must
+        // win on its alias phrase match. This is the query CD ran to isolate
+        // the alias effect — outline ranked #1 there, but in the noisy
+        // mixed query it fell out of the top 10. The phrase bonus is the
+        // mechanism that keeps it in contention even when noise is mixed in.
+        use rmcp::handler::server::wrapper::Parameters;
+        let (_tmp, paths) = test_paths();
+        let server = LibrarianServer::new(paths.clone());
+        server
+            .seed_inner(SeedParams {
+                server: "codeview".into(),
+                summary: Some("code".into()),
+                category: Some("dev".into()),
+                tools: vec![
+                    SeedTool {
+                        name: "grep".into(),
+                        description: "regex content search".into(),
+                        required: vec![],
+                        properties: Default::default(),
+                    },
+                    SeedTool {
+                        name: "outline".into(),
+                        description: "symbol-level outline of a single file".into(),
+                        required: vec![],
+                        properties: Default::default(),
+                    },
+                ],
+            })
+            .unwrap();
+        crate::playbook::write_manifest(
+            &paths,
+            "codeview",
+            &Manifest {
+                tool_aliases: vec![
+                    crate::playbook::ToolAlias {
+                        tool: "outline".into(),
+                        phrases: vec![
+                            "find function".into(),
+                            "locate definition".into(),
+                            "where is X defined".into(),
+                            "symbol lookup".into(),
+                        ],
+                    },
+                    crate::playbook::ToolAlias {
+                        tool: "grep".into(),
+                        phrases: vec!["regex search files".into(), "find pattern".into()],
+                    },
+                ],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt
+            .block_on(async {
+                server
+                    .search(Parameters(SearchParams {
+                        query: "where is a function defined".into(),
+                        limit: Some(5),
+                    }))
+                    .await
+            })
+            .unwrap();
+        let outline_pos = result
+            .find("codeview / outline")
+            .expect("outline should appear in results");
+        if let Some(grep_pos) = result.find("codeview / grep") {
+            assert!(
+                outline_pos < grep_pos,
+                "outline (full phrase match) must rank above grep on pure intent query:\n{result}"
+            );
+        }
     }
 
     #[test]
