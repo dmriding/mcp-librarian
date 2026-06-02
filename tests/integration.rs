@@ -1037,6 +1037,90 @@ fn manifest_preview_summarizes_structure() {
 }
 
 #[test]
+fn manifest_preview_nudges_when_no_gotchas() {
+    // The "Gotchas: 0 entries" line is already always shown (Layer 1 of the
+    // misplaced-gotchas defense). This adds the soft "why the zero matters"
+    // nudge so authors don't ship a thin manifest by accident.
+    let manifest = Manifest {
+        meta: ManifestMeta {
+            category: Some("comms".into()),
+            summary: Some("test".into()),
+            ..Default::default()
+        },
+        workflows: vec![ManifestWorkflow {
+            title: "wf".into(),
+            body: "...".into(),
+        }],
+        ..Default::default()
+    };
+    let target = std::path::PathBuf::from("/tmp/foo.toml");
+    let out = playbook::render_manifest_preview("foo", &manifest, &target, None);
+    // Layer 1 still works
+    assert!(out.contains("Gotchas: 0 entries"));
+    // New nudge surfaces the cost of zero
+    assert!(
+        out.contains("no gotchas listed"),
+        "expected no-gotchas nudge, got: {out}"
+    );
+    assert!(
+        out.contains("Consider adding"),
+        "nudge should suggest authoring some: {out}"
+    );
+}
+
+#[test]
+fn manifest_preview_suppresses_nudge_when_gotchas_present() {
+    // Regression guard: the nudge must NOT fire when the manifest has gotchas.
+    // An always-firing nudge would teach the agent to ignore it.
+    let manifest = Manifest {
+        meta: ManifestMeta {
+            category: Some("comms".into()),
+            summary: Some("test".into()),
+            ..Default::default()
+        },
+        gotchas: vec!["env var FOO required".into()],
+        ..Default::default()
+    };
+    let target = std::path::PathBuf::from("/tmp/foo.toml");
+    let out = playbook::render_manifest_preview("foo", &manifest, &target, None);
+    assert!(out.contains("Gotchas: 1 entries"));
+    assert!(
+        !out.contains("no gotchas listed"),
+        "nudge must not fire when gotchas exist: {out}"
+    );
+}
+
+#[test]
+fn manifest_preview_nudge_has_no_known_hang_triggers() {
+    // The nudge text is part of the manifest_write propose preview, which
+    // Claude Desktop has historically hung on when previews contain em-dashes
+    // / en-dashes / angle-bracket placeholders. Lock the discipline here so a
+    // future contributor editing the nudge can't accidentally reintroduce a
+    // trigger.
+    let manifest = Manifest {
+        meta: ManifestMeta {
+            category: Some("comms".into()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let target = std::path::PathBuf::from("/tmp/foo.toml");
+    let out = playbook::render_manifest_preview("foo", &manifest, &target, None);
+    // The nudge fires (gotchas empty)
+    assert!(out.contains("no gotchas listed"));
+    // Find just the nudge segment to assert character hygiene on it specifically
+    let nudge_start = out.find("*Note: no gotchas").expect("nudge present");
+    let nudge_end = out[nudge_start..].find("*\n").expect("nudge terminator") + nudge_start;
+    let nudge = &out[nudge_start..=nudge_end];
+    assert!(!nudge.contains('\u{2014}'), "em-dash in nudge: {nudge}");
+    assert!(!nudge.contains('\u{2013}'), "en-dash in nudge: {nudge}");
+    assert!(
+        !nudge.contains('<') && !nudge.contains('>'),
+        "angle-bracket placeholder in nudge: {nudge}"
+    );
+}
+
+#[test]
 fn manifest_preview_marks_overwrite_when_existing() {
     let existing = Manifest::default();
     let new = Manifest {

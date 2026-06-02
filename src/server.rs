@@ -453,12 +453,18 @@ impl ServerHandler for LibrarianServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             capabilities: ServerCapabilities::builder().enable_tools().build(),
+            // Surfaced by MCP clients (Claude Code, Claude Desktop, Codex) in
+            // the agent's session-init context. The directive opener converts
+            // librarian from "opt-in if you know to ask" into "the first thing
+            // the agent reads before touching any other indexed server." This
+            // is the cheapest hook for solving cold-start discoverability.
             instructions: Some(
-                "Librarian indexes your other MCP servers. Start with `librarian_list`. \
-                 Drill into a server with `librarian_help(server)`. \
-                 Hunt for a specific tool with `librarian_search(query)`. \
-                 File observations with `librarian_note`. \
-                 For the librarian's own playbook, call `librarian_help(\"librarian\")`."
+                "Orient before acting. Before calling any indexed MCP server's tools, \
+                 call `librarian_help(server)` to load that server's workflows, gotchas, \
+                 and tool categorizations.\n\n\
+                 Start with `librarian_list()` for the landscape; `librarian_search(query)` \
+                 finds tools across all servers; `librarian_note(...)` files an observation \
+                 for future sessions. Self-playbook: `librarian_help(\"librarian\")`."
                     .to_string(),
             ),
             ..Default::default()
@@ -2033,6 +2039,44 @@ summary = "minimal"
         assert!(preview.contains("Workflows (0):"));
         assert!(preview.contains("Topics (0):"));
         assert!(preview.contains("Gotchas: 0 entries"));
+    }
+
+    #[test]
+    fn server_instructions_are_directive_about_orientation() {
+        // Asserts the session-init instructions string (surfaced to agents by
+        // MCP clients at server attach) directs orientation through librarian
+        // BEFORE the agent calls any indexed server's tool. This is the
+        // load-bearing fix for cold-start discoverability.
+        let (_tmp, paths) = test_paths();
+        let server = LibrarianServer::new(paths);
+        let info = server.get_info();
+        let text = info
+            .instructions
+            .expect("server must surface instructions to MCP clients");
+        // Directive opener — the imperative that converts "opt-in" into
+        // "first thing the agent does."
+        assert!(
+            text.contains("Orient before acting"),
+            "instructions must open with directive framing: {text}"
+        );
+        // Primary action.
+        assert!(
+            text.contains("librarian_help(server)"),
+            "must name the primary orientation tool"
+        );
+        // Other read-surface tools stay surfaced for completeness.
+        assert!(text.contains("librarian_list"));
+        assert!(text.contains("librarian_search"));
+        assert!(text.contains("librarian_note"));
+        // Context-budget cap. The instructions ride in every session's init
+        // payload; bloat here costs the agent's working budget per session.
+        // 600 chars is comfortably more than the current text but stops a
+        // future contributor from turning this into a wall of prose.
+        assert!(
+            text.len() <= 600,
+            "instructions exceed 600 chars ({}); keep them tight: {text}",
+            text.len()
+        );
     }
 
     #[test]
