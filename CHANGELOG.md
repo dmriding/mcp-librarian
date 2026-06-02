@@ -6,9 +6,14 @@ All notable changes to this project will be documented here. Format follows [Kee
 
 ### Changed
 - Rewrote the rmcp server `instructions` string (surfaced to agents in session-init context by Claude Desktop / Claude Code / Codex) to open with directive framing: *"Orient before acting. Before calling any indexed MCP server's tools, call `librarian_help(server)`..."*. Closes the cold-start discoverability gap from the 2026-06-02 Claude Desktop feedback — the prior text was informational and left the orient-first behavior opt-in.
+- `librarian_search` ranking now folds curated **intent phrases** into the score. The internal `rank()` function gained an `aliases` arm sized between description (30) and tool name (100) — curated phrases beat auto-descriptions but the tool's own name still wins for direct lookups. Closes the round-2 failure where `"search code for where a function is defined"` returned hosted servers' `*_search_*` tools with zero codeview results.
 
 ### Added
 - `librarian_manifest_write` propose preview now surfaces a soft nudge when a manifest has zero gotchas: *"no gotchas listed. Real-world usage patterns and footguns are typically the highest-signal part of a playbook. Consider adding 2-3 before committing."* Not a hard reject — some servers legitimately have none. Mirrors the existing "always show `Gotchas: 0 entries`" discipline by making the absence's *cost* visible alongside its count.
+- **`tool_aliases` field on manifests** — manifest authors can attach intent phrases per tool name (e.g. `outline` aliased to `["find function", "locate definition", "where is X defined", "symbol lookup"]`). Phrases are folded into `librarian_search` ranking so agents describing intent in natural language surface the right tool even when it shares no lexical tokens with the query. Backward-compatible (`#[serde(default)]`); existing manifests parse unchanged. Documented in `librarian_help("librarian", "manifest_schema")` with a worked example and an inert-when-mistargeted guarantee for stale alias entries.
+
+### Fixed
+- Typo in `librarian_help("librarian")` workflow text — `tools_dump` → `tools` (matches the actual `librarian_seed_playbook` parameter name).
 
 ## [0.1.0] - 2026-05-16
 
