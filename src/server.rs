@@ -604,11 +604,23 @@ impl LibrarianServer {
         let q_tokens: Vec<&str> = q.split_whitespace().collect();
 
         let mut hits: Vec<(String, String, String, i64)> = Vec::new();
+        // Per-call manifest cache so the indexed-server pass doesn't re-read
+        // each manifest once per tool. Keyed by server name; value is the
+        // optional Manifest (None means "checked, no manifest exists").
+        let mut manifest_cache: std::collections::HashMap<String, Option<Manifest>> =
+            std::collections::HashMap::new();
 
-        // Pass 1: indexed servers — rank their probed tools by name + description.
+        // Pass 1: indexed servers — rank their probed tools by name + description,
+        // boosted by any tool_aliases attached to the tool in the server's manifest.
         for entry in index.servers.values() {
+            let manifest = manifest_cache
+                .entry(entry.name.clone())
+                .or_insert_with(|| {
+                    playbook::load_manifest(&self.paths, &entry.name).ok().flatten()
+                });
             for tool in &entry.tools {
-                let score = rank(&q, &q_tokens, &tool.name, &tool.description);
+                let aliases = collect_aliases_for_tool(manifest.as_ref(), &tool.name);
+                let score = rank(&q, &q_tokens, &tool.name, &tool.description, &aliases);
                 if score > 0 {
                     hits.push((
                         entry.name.clone(),
@@ -622,6 +634,8 @@ impl LibrarianServer {
 
         // Pass 2: manifest-only servers — rank against manifest content so
         // pre-authored playbooks are findable even before the server is installed.
+        // Aliases flow into `manifest_haystack` here (catch-all), since there's
+        // no specific tool to attribute them to.
         for server in playbook::list_manifest_servers(&self.paths).unwrap_or_default() {
             if index.servers.contains_key(&server) {
                 continue;
@@ -631,7 +645,7 @@ impl LibrarianServer {
                 _ => continue,
             };
             let haystack = manifest_haystack(&manifest);
-            let score = rank(&q, &q_tokens, &server, &haystack);
+            let score = rank(&q, &q_tokens, &server, &haystack, "");
             if score > 0 {
                 let desc = format!(
                     "[NOT INSTALLED] {}",
@@ -1748,16 +1762,57 @@ fn manifest_haystack(m: &Manifest) -> String {
         s.push_str(g);
         s.push(' ');
     }
+    // Tool-aliases: phrases authored to make a tool findable by intent
+    // even when its name/description don't carry the intent's words.
+    // For the manifest-only-server search pass these flow into the
+    // catch-all haystack; for indexed servers, aliases get a per-tool
+    // boost in the rank function via `collect_aliases_for_tool` below.
+    for alias in &m.tool_aliases {
+        for phrase in &alias.phrases {
+            s.push_str(phrase);
+            s.push(' ');
+        }
+    }
     s
 }
 
-fn rank(query: &str, query_tokens: &[&str], name: &str, description: &str) -> i64 {
+/// Collect alias phrases attached to `tool_name` from a manifest, flattened
+/// into a single haystack string. Returns empty string if no manifest, no
+/// aliases for this tool, or the aliases entry has no phrases.
+fn collect_aliases_for_tool(manifest: Option<&Manifest>, tool_name: &str) -> String {
+    let Some(m) = manifest else { return String::new() };
+    let mut out = String::new();
+    for alias in &m.tool_aliases {
+        if alias.tool == tool_name {
+            for phrase in &alias.phrases {
+                out.push_str(phrase);
+                out.push(' ');
+            }
+        }
+    }
+    out
+}
+
+fn rank(
+    query: &str,
+    query_tokens: &[&str],
+    name: &str,
+    description: &str,
+    aliases: &str,
+) -> i64 {
     let name_lower = name.to_lowercase();
     let desc_lower = description.to_lowercase();
+    let aliases_lower = aliases.to_lowercase();
     let mut score: i64 = 0;
     // Whole-query substring matches are highest signal
     if name_lower.contains(query) {
         score += 100;
+    }
+    // Curated intent phrases beat auto-descriptions but lose to the tool's
+    // own name. Sized so a manifest with a literal-phrase match outranks
+    // an unrelated tool whose name happens to contain a common search term.
+    if !aliases_lower.is_empty() && aliases_lower.contains(query) {
+        score += 60;
     }
     if desc_lower.contains(query) {
         score += 30;
@@ -1771,6 +1826,9 @@ fn rank(query: &str, query_tokens: &[&str], name: &str, description: &str) -> i6
         }
         if name_lower.contains(token) {
             score += 25;
+        }
+        if !aliases_lower.is_empty() && aliases_lower.contains(token) {
+            score += 15;
         }
         if desc_lower.contains(token) {
             score += 8;
@@ -2825,7 +2883,7 @@ summary = "minimal"
         let q = "files in a repo";
         let tokens: Vec<&str> = q.split_whitespace().collect();
         // "forge_sprint_status" doesn't contain "files" or "repo" — should score 0
-        let score = rank(q, &tokens, "forge_sprint_status", "Check sprint state");
+        let score = rank(q, &tokens, "forge_sprint_status", "Check sprint state", "");
         assert_eq!(
             score, 0,
             "stop-word and short-token matches must not contribute to score"
@@ -2842,7 +2900,282 @@ summary = "minimal"
             &tokens,
             "github_search",
             "Search files across the repo",
+            "",
         );
         assert!(score > 0, "meaningful tokens should still score");
+    }
+
+    #[test]
+    fn rank_alias_phrase_boosts_above_unrelated_name_match() {
+        // The reported failure case from docs/round2.md: a query whose
+        // intent words don't match the right tool's name, but DO match
+        // an authored alias. The aliased tool must outrank a tool whose
+        // name happens to contain a generic search term.
+        let q = "where is a function defined";
+        let tokens: Vec<&str> = q.split_whitespace().collect();
+        // `outline` has no description and no token overlap with the query.
+        // But its alias says "find function" / "locate definition" which
+        // shares two meaningful tokens with the query ("function", "defined"
+        // matches "definition" only as a substring of the alias).
+        let aliased_score = rank(
+            q,
+            &tokens,
+            "outline",
+            "",
+            "find function locate definition where is X defined symbol lookup",
+        );
+        // `slack_search` has no alias but its name contains "search" — no
+        // token overlap with the actual query either, so score should be 0
+        // or low.
+        let unaliased_score = rank(q, &tokens, "slack_search", "search Slack channels", "");
+        assert!(
+            aliased_score > unaliased_score,
+            "aliased tool ({aliased_score}) must outrank unaliased lexical-noise hit ({unaliased_score})"
+        );
+        assert!(aliased_score > 0, "aliased tool should score above 0");
+    }
+
+    #[test]
+    fn search_with_tool_aliases_surfaces_codeview_above_lexical_noise() {
+        // End-to-end repro of the docs/round2.md failure: an intent-style
+        // query whose meaningful tokens don't overlap with the right tool's
+        // name. With an authored alias on the right tool, search must rank
+        // it above unrelated tools whose names happen to contain a token
+        // from the query.
+        use rmcp::handler::server::wrapper::Parameters;
+        let (_tmp, paths) = test_paths();
+        let server = LibrarianServer::new(paths.clone());
+
+        // Seed two servers: codeview (with grep + outline) and slack
+        // (with a search-named tool that shouldn't win on intent).
+        server
+            .seed_inner(SeedParams {
+                server: "codeview".into(),
+                summary: Some("read-only code inspection".into()),
+                category: Some("developer-tools".into()),
+                tools: vec![
+                    SeedTool {
+                        name: "grep".into(),
+                        description: "regex content search".into(),
+                        required: vec![],
+                        properties: Default::default(),
+                    },
+                    SeedTool {
+                        name: "outline".into(),
+                        description: "symbol-level outline of a single file".into(),
+                        required: vec![],
+                        properties: Default::default(),
+                    },
+                ],
+            })
+            .unwrap();
+        server
+            .seed_inner(SeedParams {
+                server: "slack".into(),
+                summary: Some("team chat".into()),
+                category: Some("comms".into()),
+                tools: vec![SeedTool {
+                    name: "slack_search_channels".into(),
+                    description: "find channels by name".into(),
+                    required: vec![],
+                    properties: Default::default(),
+                }],
+            })
+            .unwrap();
+
+        // Author a manifest for codeview aliasing `outline` to intent phrases
+        // that DO share tokens with the failing query.
+        crate::playbook::write_manifest(
+            &paths,
+            "codeview",
+            &Manifest {
+                tool_aliases: vec![crate::playbook::ToolAlias {
+                    tool: "outline".into(),
+                    phrases: vec![
+                        "find function".into(),
+                        "locate definition".into(),
+                        "where is X defined".into(),
+                        "symbol lookup".into(),
+                    ],
+                }],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // Run the failing query through the public search tool method.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt
+            .block_on(async {
+                server
+                    .search(Parameters(SearchParams {
+                        query: "search code for where a function is defined".into(),
+                        limit: Some(10),
+                    }))
+                    .await
+            })
+            .unwrap();
+
+        // codeview/outline should appear BEFORE any slack_* tool.
+        let outline_pos = result
+            .find("codeview / outline")
+            .expect("codeview/outline should be in results");
+        let slack_pos = result.find("slack_search_channels");
+        if let Some(sp) = slack_pos {
+            assert!(
+                outline_pos < sp,
+                "codeview/outline must rank above slack search:\n{result}"
+            );
+        }
+    }
+
+    #[test]
+    fn search_aliases_inert_when_query_doesnt_match_phrases() {
+        // Aliases must boost ONLY when the query content actually overlaps
+        // with a phrase. A slack query shouldn't surface codeview just
+        // because codeview HAS some aliases.
+        use rmcp::handler::server::wrapper::Parameters;
+        let (_tmp, paths) = test_paths();
+        let server = LibrarianServer::new(paths.clone());
+        server
+            .seed_inner(SeedParams {
+                server: "codeview".into(),
+                summary: Some("code".into()),
+                category: Some("dev".into()),
+                tools: vec![SeedTool {
+                    name: "outline".into(),
+                    description: "".into(),
+                    required: vec![],
+                    properties: Default::default(),
+                }],
+            })
+            .unwrap();
+        server
+            .seed_inner(SeedParams {
+                server: "slack".into(),
+                summary: Some("chat".into()),
+                category: Some("comms".into()),
+                tools: vec![SeedTool {
+                    name: "slack_send_message".into(),
+                    description: "post a message to a channel".into(),
+                    required: vec![],
+                    properties: Default::default(),
+                }],
+            })
+            .unwrap();
+        crate::playbook::write_manifest(
+            &paths,
+            "codeview",
+            &Manifest {
+                tool_aliases: vec![crate::playbook::ToolAlias {
+                    tool: "outline".into(),
+                    phrases: vec!["find function".into()],
+                }],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt
+            .block_on(async {
+                server
+                    .search(Parameters(SearchParams {
+                        query: "post message to slack channel".into(),
+                        limit: Some(10),
+                    }))
+                    .await
+            })
+            .unwrap();
+
+        let slack_pos = result.find("slack_send_message");
+        if let Some(sp) = slack_pos {
+            // Codeview entries may or may not be present; if present they
+            // must rank below slack.
+            if let Some(cv_pos) = result.find("codeview / outline") {
+                assert!(
+                    sp < cv_pos,
+                    "slack must rank above codeview when query is slack-shaped:\n{result}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn aliases_for_nonexistent_tool_are_inert() {
+        // An alias whose `tool` field names a tool the server doesn't have
+        // must not surface any tool in search just because the alias phrases
+        // matched the query. Guards against manifest drift (tool was removed
+        // but alias entry left behind).
+        use rmcp::handler::server::wrapper::Parameters;
+        let (_tmp, paths) = test_paths();
+        let server = LibrarianServer::new(paths.clone());
+        server
+            .seed_inner(SeedParams {
+                server: "codeview".into(),
+                summary: Some("code".into()),
+                category: Some("dev".into()),
+                tools: vec![SeedTool {
+                    name: "grep".into(),
+                    description: "regex search".into(),
+                    required: vec![],
+                    properties: Default::default(),
+                }],
+            })
+            .unwrap();
+        // Alias points at `ghost_tool` which isn't in the seeded tool list.
+        // Phrases share tokens with the query, but should NOT surface any
+        // codeview tool because of this alias.
+        crate::playbook::write_manifest(
+            &paths,
+            "codeview",
+            &Manifest {
+                tool_aliases: vec![crate::playbook::ToolAlias {
+                    tool: "ghost_tool".into(),
+                    phrases: vec!["nuclear fusion reactor".into()],
+                }],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt
+            .block_on(async {
+                server
+                    .search(Parameters(SearchParams {
+                        query: "nuclear fusion reactor".into(),
+                        limit: Some(10),
+                    }))
+                    .await
+            })
+            .unwrap();
+
+        // No codeview tool should appear in the results — the alias is
+        // attached to a tool that doesn't exist, so it has no host to boost.
+        assert!(
+            !result.contains("codeview /"),
+            "alias attached to a non-existent tool must not surface unrelated tools:\n{result}"
+        );
+    }
+
+    #[test]
+    fn rank_alias_does_not_boost_unrelated_queries() {
+        // Aliases must only boost queries whose content actually matches an
+        // alias phrase. A query about Slack channels shouldn't surface a
+        // codeview tool just because that tool has *any* aliases.
+        let q = "slack channel message";
+        let tokens: Vec<&str> = q.split_whitespace().collect();
+        let codeview_alias_score = rank(
+            q,
+            &tokens,
+            "outline",
+            "",
+            "find function locate definition symbol lookup",
+        );
+        assert_eq!(
+            codeview_alias_score, 0,
+            "alias must not boost a tool when query has zero overlap with phrases"
+        );
     }
 }

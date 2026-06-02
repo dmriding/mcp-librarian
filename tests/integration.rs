@@ -4,7 +4,9 @@ use mcp_librarian::discovery;
 use mcp_librarian::index::{
     self, ArgSummary, Index, IndexedTool, Note, NoteBasis, NoteKind, ProbeStatus, ServerEntry,
 };
-use mcp_librarian::playbook::{self, Manifest, ManifestCategory, ManifestMeta, ManifestTopic, ManifestWorkflow};
+use mcp_librarian::playbook::{
+    self, Manifest, ManifestCategory, ManifestMeta, ManifestTopic, ManifestWorkflow, ToolAlias,
+};
 use serde_json::json;
 use std::collections::BTreeMap;
 use tempfile::TempDir;
@@ -244,6 +246,7 @@ fn render_overview_includes_workflows_and_gotchas() {
         }],
         tool_categories: vec![],
         gotchas: vec!["Writes are budget-capped.".into()],
+        tool_aliases: vec![],
     };
     let notes = vec![Note {
         timestamp: Utc::now(),
@@ -282,6 +285,7 @@ fn render_topic_drill_down() {
         workflows: vec![],
         tool_categories: vec![],
         gotchas: vec![],
+        tool_aliases: vec![],
     };
     let out = playbook::render_help(&entry, Some(&manifest), &[], Some("ingestion"));
     assert!(out.contains("Ingestion Pipeline"));
@@ -307,6 +311,7 @@ fn topic_renders_tools_in_named_category() {
             tools: vec!["query_nodes".into(), "query_edges".into()],
         }],
         gotchas: vec![],
+        tool_aliases: vec![],
     };
     let out = playbook::render_help(&entry, Some(&manifest), &[], Some("Read"));
     assert!(out.contains("query_nodes"));
@@ -888,6 +893,96 @@ fn librarian_render_self_advertises_topics() {
     assert!(s.contains("manifest_schema"));
 }
 
+// --- tool_aliases (round-2 search intent fix) ---
+
+#[test]
+fn manifest_with_tool_aliases_round_trips_toml() {
+    // The new field must serialize and parse back identically. Catches a
+    // schema drift that would break manifest_write or load_manifest.
+    let original = Manifest {
+        meta: ManifestMeta {
+            category: Some("dev".into()),
+            summary: Some("test".into()),
+            ..Default::default()
+        },
+        tool_aliases: vec![
+            ToolAlias {
+                tool: "outline".into(),
+                phrases: vec![
+                    "find function".into(),
+                    "locate definition".into(),
+                    "where is X defined".into(),
+                ],
+            },
+            ToolAlias {
+                tool: "grep".into(),
+                phrases: vec!["regex search".into()],
+            },
+        ],
+        ..Default::default()
+    };
+    let serialized = toml::to_string_pretty(&original).unwrap();
+    let parsed: Manifest = toml::from_str(&serialized).unwrap();
+    assert_eq!(parsed.tool_aliases.len(), 2);
+    assert_eq!(parsed.tool_aliases[0].tool, "outline");
+    assert_eq!(parsed.tool_aliases[0].phrases.len(), 3);
+    assert_eq!(parsed.tool_aliases[0].phrases[2], "where is X defined");
+    assert_eq!(parsed.tool_aliases[1].tool, "grep");
+}
+
+#[test]
+fn manifest_with_only_tool_aliases_is_not_empty() {
+    // A manifest authored solely to add intent aliases (e.g. as a follow-up
+    // to a seeded entry) must not be rejected by the empty-manifest guard.
+    let m = Manifest {
+        tool_aliases: vec![ToolAlias {
+            tool: "foo".into(),
+            phrases: vec!["bar".into()],
+        }],
+        ..Default::default()
+    };
+    assert!(!playbook::manifest_is_empty(&m));
+}
+
+#[test]
+fn manifest_schema_topic_documents_tool_aliases() {
+    let out = playbook::render_librarian_topic("manifest_schema");
+    assert!(
+        out.contains("[[tool_aliases]]"),
+        "schema topic should document the [[tool_aliases]] section"
+    );
+    assert!(out.contains("phrases"), "should name the phrases field");
+    assert!(
+        out.contains("outline"),
+        "schema example should reference outline as the worked case"
+    );
+    // The example block at the bottom of the topic should include an
+    // alias entry so an agent copy-pasting gets the field shape right.
+    let example_marker = out.find("Minimal working example").expect("example section");
+    let example_tail = &out[example_marker..];
+    assert!(
+        example_tail.contains("tool_aliases"),
+        "minimal working example must include tool_aliases"
+    );
+}
+
+#[test]
+fn librarian_render_self_uses_correct_seed_arg_name() {
+    // Round-2 typo: prior text said `tools_dump=...` but the actual param
+    // is `tools`. Verify the typo is gone and the correct shape is shown.
+    let s = playbook::render_self();
+    assert!(
+        !s.contains("tools_dump"),
+        "self-playbook must not reference the wrong arg name `tools_dump`"
+    );
+    assert!(
+        s.contains("librarian_seed_playbook"),
+        "should still document seed_playbook"
+    );
+    // Confirm the corrected example shape uses the real param name.
+    assert!(s.contains("tools="));
+}
+
 // --- virtual topics (Fix 2) ---
 
 #[test]
@@ -1019,6 +1114,7 @@ fn manifest_preview_summarizes_structure() {
             body: "stuff".into(),
         }],
         gotchas: vec!["X is gated at 1/sec".into(), "Y too".into()],
+        tool_aliases: vec![],
     };
     let target = std::path::PathBuf::from("/tmp/foo.toml");
     let out = playbook::render_manifest_preview("foo", &manifest, &target, None);
@@ -1194,6 +1290,7 @@ fn sample_manifest(category: &str, summary: &str) -> Manifest {
         workflows: vec![],
         topics: vec![],
         gotchas: vec!["watch out".into()],
+        tool_aliases: vec![],
     }
 }
 
@@ -1231,6 +1328,7 @@ fn diff_shows_added_changed_removed() {
         workflows: vec![],
         topics: vec![],
         gotchas: vec!["g1".into(), "g2".into()],
+        tool_aliases: vec![],
     };
     let curr = Manifest {
         meta: ManifestMeta {
@@ -1246,6 +1344,7 @@ fn diff_shows_added_changed_removed() {
         workflows: vec![],
         topics: vec![],
         gotchas: vec!["g1".into(), "g3".into()], // g2 removed, g3 added
+        tool_aliases: vec![],
     };
     let out = playbook::diff_manifests(&prev, &curr);
     assert!(out.contains("summary"));

@@ -23,6 +23,12 @@ pub struct Manifest {
     pub tool_categories: Vec<ManifestCategory>,
     #[serde(default)]
     pub gotchas: Vec<String>,
+    /// Intent phrases attached to specific tools so `librarian_search` surfaces
+    /// them on natural-language queries that don't share lexical tokens with
+    /// the tool's name or description. Author-curated; folded into the search
+    /// haystack with weight between description and tool name.
+    #[serde(default)]
+    pub tool_aliases: Vec<ToolAlias>,
 }
 
 #[derive(Debug, Default, Clone, Deserialize, Serialize, JsonSchema)]
@@ -64,6 +70,19 @@ pub struct ManifestCategory {
     pub tools: Vec<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct ToolAlias {
+    /// The tool name these phrases apply to (must match the tool's real name).
+    /// Aliases attached to a name that isn't actually exposed by the server
+    /// are inert — they don't surface unrelated tools in search.
+    pub tool: String,
+    /// Intent phrases. Each phrase is included in the search ranking haystack
+    /// for the named tool. Use when the tool's name and description don't
+    /// carry the words a user would naturally search by (e.g. an `outline`
+    /// tool aliased to "find function" / "locate definition").
+    pub phrases: Vec<String>,
+}
+
 /// Check whether a manifest has any meaningful content. Used as a safety
 /// net before writing — refuses to clobber a curated manifest with an empty one.
 pub fn manifest_is_empty(m: &Manifest) -> bool {
@@ -74,6 +93,7 @@ pub fn manifest_is_empty(m: &Manifest) -> bool {
         && m.workflows.is_empty()
         && m.tool_categories.is_empty()
         && m.gotchas.is_empty()
+        && m.tool_aliases.is_empty()
 }
 
 pub fn load_manifest(paths: &Paths, server: &str) -> Result<Option<Manifest>> {
@@ -760,18 +780,19 @@ pub fn render_self() -> String {
     s.push_str("3. `librarian_help(server, topic)` — drill into one workflow\n\n");
     s.push_str("### Bootstrapping a cloud server\n");
     s.push_str("1. You see `claude.ai_Foo` in your deferred tool list\n");
-    s.push_str("2. `librarian_seed_playbook(server=\"claude.ai_Foo\", tools_dump=...)` with the tool list you can see\n");
+    s.push_str("2. `librarian_seed_playbook(server=\"claude.ai_Foo\", tools=[{\"name\": ...}, ...])` with the tool list you can see\n");
     s.push_str("3. Future sessions see it via `librarian_list` and can drill into it\n\n");
     s.push_str("### Filing what you learn\n");
     s.push_str("1. You just used a tool and discovered a non-obvious behavior\n");
     s.push_str("2. `librarian_note(server, kind=\"workflow\"|\"behavior\"|..., basis=\"observed\", claim=\"...\")`\n");
     s.push_str("3. Next session sees the note attached to the right help page\n\n");
     s.push_str("### Authoring a manifest (the curated playbook for a server)\n");
-    s.push_str("1. Construct the `Manifest` (meta, tool_categories, workflows, topics, gotchas)\n");
+    s.push_str("1. Construct the `Manifest` (meta, tool_categories, workflows, topics, gotchas, tool_aliases)\n");
     s.push_str("2. `librarian_manifest_write(server, manifest)` — WITHOUT confirm_token, returns a preview + token\n");
     s.push_str("3. Show the preview to the user verbatim. Wait for them to type \"I agree\" or \"yes\".\n");
     s.push_str("4. Re-call with the same manifest plus `confirm_token=...` to commit\n");
-    s.push_str("5. `librarian_manifest_diff(server)` to inspect what changed; `librarian_manifest_restore(server)` to undo\n\n");
+    s.push_str("5. `librarian_manifest_diff(server)` to inspect what changed; `librarian_manifest_restore(server)` to undo\n");
+    s.push_str("6. `tool_aliases` attaches intent phrases to specific tools so `librarian_search` surfaces them on natural-language queries whose words don't appear in the tool's name/description. See `librarian_help(\"librarian\", \"manifest_schema\")`.\n\n");
     s.push_str("### Bootstrapping a hosted MCP server from vendor docs\n");
     s.push_str("For cloud/claude.ai-mediated servers the librarian can't probe directly, vendor public docs are higher-signal than the schema dump:\n");
     s.push_str("1. `librarian_fetch_docs(url=\"https://docs.vendor.com/mcp\")` — returns cleaned doc content\n");
@@ -1004,6 +1025,32 @@ fn render_manifest_schema_topic() -> String {
     s.push_str("- `title` — string. Human-readable title for the topic page.\n");
     s.push_str("- `body` — string (multi-line OK). Markdown body.\n\n");
 
+    s.push_str("### `[[tool_aliases]]` (array of tables)\n");
+    s.push_str("- `tool` — string. Name of an existing tool on this server.\n");
+    s.push_str("- `phrases` — array of strings. Intent phrases that `librarian_search` will \
+                 fold into ranking for the named tool.\n\n");
+    s.push_str(
+        "**When to use it.** When the tool's name and description don't carry the words a \
+         user would naturally search by. Example: a `outline` tool whose job is \"find \
+         where a function is defined\" — none of those words appear in `outline` or its \
+         short description, so a query like `\"where is X defined\"` won't surface it \
+         under lexical ranking. Aliasing `outline` to phrases like `\"find function\"`, \
+         `\"locate definition\"`, `\"where is X defined\"`, `\"symbol lookup\"` closes \
+         that gap.\n\n",
+    );
+    s.push_str(
+        "**Weighting.** Curated phrases score above auto-descriptions but below the \
+         tool's own name in `librarian_search`. So `outline` still beats anything for a \
+         query of just `outline`, but `\"where is a function defined\"` will surface \
+         `outline` above tools whose names happen to contain unrelated lexical noise like \
+         `\"search\"`.\n\n",
+    );
+    s.push_str(
+        "**Inert when mistargeted.** An alias whose `tool` field names a tool the server \
+         doesn't actually expose is silently ignored (doesn't surface unrelated tools). \
+         The alias's only effect is to boost the named tool, if it exists.\n\n",
+    );
+
     s.push_str("## Minimal working example\n\n");
     s.push_str("```toml\n");
     s.push_str("gotchas = [\n");
@@ -1030,7 +1077,10 @@ fn render_manifest_schema_topic() -> String {
     s.push_str("title = \"Authentication setup\"\n");
     s.push_str("body  = \"\"\"\n");
     s.push_str("Set `FOO_API_KEY` in the environment. The key needs `read:foo` scope.\n");
-    s.push_str("\"\"\"\n");
+    s.push_str("\"\"\"\n\n");
+    s.push_str("[[tool_aliases]]\n");
+    s.push_str("tool    = \"foo_get\"\n");
+    s.push_str("phrases = [\"fetch by id\", \"load a record\", \"look up an item\"]\n");
     s.push_str("```\n\n");
 
     s.push_str("## Validation\n\n");
