@@ -4,16 +4,21 @@ All notable changes to this project will be documented here. Format follows [Kee
 
 ## [Unreleased]
 
-### Changed
-- Rewrote the rmcp server `instructions` string (surfaced to agents in session-init context by Claude Desktop / Claude Code / Codex) to open with directive framing: *"Orient before acting. Before calling any indexed MCP server's tools, call `librarian_help(server)`..."*. Closes the cold-start discoverability gap from the 2026-06-02 Claude Desktop feedback — the prior text was informational and left the orient-first behavior opt-in.
-- `librarian_search` ranking now folds curated **intent phrases** into the score. The internal `rank()` function gained an `aliases` arm sized between description (30) and tool name (100) — curated phrases beat auto-descriptions but the tool's own name still wins for direct lookups. Closes the round-2 failure where `"search code for where a function is defined"` returned hosted servers' `*_search_*` tools with zero codeview results.
-- `librarian_search` ranking adds a **per-phrase token-overlap bonus** on top of the haystack-level alias scoring. When an alias phrase has ≥2 meaningful tokens and ≥50% of them appear in the query, the tool gets a phrase-level bonus (`matched * 20`, capped at +80) so multi-word intent matches outrank tools that only share a single common token via their name. Closes the noisy-query follow-up: queries like `"search code for where a function is defined"` previously buried `outline` (alias-only) below stacks of hosted `*_search_*` tools with one shared name token; the phrase bonus lifts it back into contention. Phrase tokenization uses a smaller stop-word list than the query tokenizer — wh-words ("where", "what") and action verbs ("find", "locate") are kept because those are the intent signals authors curate aliases around.
+## [0.2.0] - 2026-06-02
+
+Intent-aware search and directive session orientation. Manifests gain a new additive `tool_aliases` field; agents get a session-init nudge to orient before acting; tool failures now arrive as `Ok` content so no client renderer can swallow them.
 
 ### Added
-- `librarian_manifest_write` propose preview now surfaces a soft nudge when a manifest has zero gotchas: *"no gotchas listed. Real-world usage patterns and footguns are typically the highest-signal part of a playbook. Consider adding 2-3 before committing."* Not a hard reject — some servers legitimately have none. Mirrors the existing "always show `Gotchas: 0 entries`" discipline by making the absence's *cost* visible alongside its count.
-- **`tool_aliases` field on manifests** — manifest authors can attach intent phrases per tool name (e.g. `outline` aliased to `["find function", "locate definition", "where is X defined", "symbol lookup"]`). Phrases are folded into `librarian_search` ranking so agents describing intent in natural language surface the right tool even when it shares no lexical tokens with the query. Backward-compatible (`#[serde(default)]`); existing manifests parse unchanged. Documented in `librarian_help("librarian", "manifest_schema")` with a worked example and an inert-when-mistargeted guarantee for stale alias entries.
+- **`tool_aliases` field on manifests** — manifest authors can attach intent phrases per tool (e.g. `outline` aliased to `["find function", "locate definition", "where is X defined"]`). Phrases are folded into `librarian_search` ranking so agents describing intent in natural language surface the right tool even when it shares no lexical tokens with the query. Backward-compatible (`#[serde(default)]`); existing manifests parse unchanged. Documented in `librarian_help("librarian", "manifest_schema")`.
+- `librarian_manifest_write` propose preview now surfaces a soft nudge when a manifest has zero gotchas: *"no gotchas listed. Real-world usage patterns and footguns are typically the highest-signal part of a playbook. Consider adding 2-3 before committing."* Not a hard reject — some servers legitimately have none.
+
+### Changed
+- Rewrote the rmcp server `instructions` string (surfaced at session init by Claude Desktop / Claude Code / Codex) to open with directive framing: *"Orient before acting. Before calling any indexed MCP server's tools, call `librarian_help(server)`..."*. The prior text was informational and left the orient-first behavior opt-in.
+- `librarian_search` ranking now folds curated **intent phrases** into the score (see Added: `tool_aliases`). Alias hits rank between description and tool-name weight — curated phrases beat auto-descriptions but the tool's own name still wins for direct lookups.
+- `librarian_search` ranking adds a **per-phrase token-overlap bonus** on top of haystack-level alias scoring: when an alias phrase has ≥2 meaningful tokens and ≥50% of them appear in the query, the tool gets a phrase-level bonus so multi-word intent matches outrank tools that only share a single common token via their name.
 
 ### Fixed
+- Tool failures now return `Ok` MCP content with a leading `Error: …` prefix instead of JSON-RPC `error` envelopes. Claude Desktop swallows JSON-RPC errors on some renderer paths, hiding the actionable diagnostic; returning failures as normal tool output makes them visible to the agent and the user. Supersedes the `invalid_params` approach shipped in 0.1.0 for the user-facing cases.
 - Typo in `librarian_help("librarian")` workflow text — `tools_dump` → `tools` (matches the actual `librarian_seed_playbook` parameter name).
 
 ## [0.1.0] - 2026-05-16
@@ -85,5 +90,6 @@ First public version. Everything below is shipped on `main` and exercised agains
 - DNS rebinding is not mitigated (would require IP pinning that `reqwest` doesn't expose cleanly)
 - Single-host only; no clustering, no shared state across machines
 
-[Unreleased]: https://github.com/dmriding/mcp-librarian/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/dmriding/mcp-librarian/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/dmriding/mcp-librarian/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/dmriding/mcp-librarian/releases/tag/v0.1.0

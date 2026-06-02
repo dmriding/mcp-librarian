@@ -65,6 +65,7 @@ The agent's discovery cost collapses from "N schemas × M tools each" to **one t
 - **Security-conscious.** SSRF guards on outbound fetch, path-traversal validation on every `server` parameter, single-use tokens with content fingerprints on every write.
 - **Rust, no runtime dependencies.** Single statically-linked binary. ~12 MB.
 - **Designed for the worst-case AI.** Gates are *code rules*, not social rules in tool descriptions. An agent that ignores instructions still can't write a manifest without producing a structured preview first.
+- **Diagnostics-as-content.** Tool failures return `Ok` MCP content with a leading `Error: …` prefix, not JSON-RPC `error` envelopes. Agents see schema violations, expired tokens, and validation failures inline in the same response stream they read on success — no client transport quirk can hide them from the model.
 
 ## What this is not
 
@@ -103,6 +104,8 @@ Three pieces of state live on disk, all human-readable, all editable:
 2. The indexed tools (from probing the live server) are grouped under the manifest's `tool_categories`, or auto-grouped by name prefix if no categories defined
 3. Learned notes with `basis="observed"` render under their relevant sections (workflows → Key Workflows, behavior/tip/error_pattern → Gotchas)
 4. Learned notes with `basis="inferred"` render in a weaker, separately-labeled section so a future agent knows to trust them less
+
+**Search is intent-aware.** `librarian_search` matches across tool names, descriptions, and any `tool_aliases` phrases declared in the manifest. A query like `"post to channel"` ranks Slack's `chat_send_message` first when the author has wired that intent into `tool_aliases`, even if the word "post" never appears in the tool's description.
 
 When you run `librarian_refresh`, the librarian re-probes every stdio MCP server, compares each tool's argument shape against the prior index, and **flags learned notes about tools whose schemas drifted** with a `⚠possibly stale` marker. Stale notes are not deleted — you read them and decide.
 
@@ -239,7 +242,7 @@ That works — they each spawn their own librarian process sharing the same data
 | `librarian_onboarding` | Returns a one-shot bootstrap prompt for first-install setup — refresh local stdio + seed every hosted server visible in the agent's deferred-tools reminder. |
 | `librarian_list` | Directory of all known MCP servers, grouped by category. Optional `category` filter. |
 | `librarian_help` | Playbook for one server. No `topic` = overview; with `topic` = drill-down. `server="librarian"` returns the librarian's own playbook. `topic="manifest_schema"` returns the TOML reference. |
-| `librarian_search` | Fuzzy-match across every known tool's name + description. Stop-word filtered. |
+| `librarian_search` | Intent-aware fuzzy match across every known tool's name, description, and manifest `tool_aliases` phrases. Stop-word filtered. |
 | `librarian_note` | Agent appends an observation about a server's behavior. Soft-dedup at write time on (server, tool, kind, normalized claim). `allow_duplicate=true` to bypass. |
 | `librarian_seed_playbook` | Bootstrap a single hosted/cloud server entry from the tool list the agent already sees in its deferred-tools reminder. No approval gate — for fast incremental "I just noticed a new server" additions. |
 | `librarian_seed_batch` | Bulk-seed many hosted servers in one approved transaction. Two-step propose/commit gate (one user approval covers the whole batch). The recommended path for first-install onboarding when there are 5+ hosted MCPs to register. |
@@ -295,6 +298,13 @@ body  = """
 Posting is gated at ~1 message per second per channel.
 On 429, back off for the value of the Retry-After header.
 """
+
+# Optional: per-tool intent phrases, folded into librarian_search ranking
+# so natural-language queries find the right tool even when the wording
+# doesn't appear in the tool's name or description.
+[[tool_aliases]]
+tool    = "chat_send_message"
+phrases = ["post to channel", "send a message", "reply in thread"]
 ```
 
 For the full schema reference (every field documented, plus the TOML grammar trap with root keys vs sections), have the agent call:
@@ -420,7 +430,7 @@ Response bodies are capped at 5 MiB to prevent OOM.
 
 **Server-name validation.** The `server` argument in every tool that takes one is validated to `[A-Za-z0-9_.-]+` with no leading dot, preventing path-traversal writes via names like `../../foo`.
 
-**Propose/commit gates.** Every write tool (`librarian_manifest_write`, `librarian_manifest_restore`) requires a two-step dance: the propose call returns a structured preview + a single-use token; the commit call must include that token AND the same content (fingerprinted). Tokens expire in 5 minutes. This is the code-rule that prevents an agent from auto-committing destructive changes — designed for the worst-case AI, not the best.
+**Propose/commit gates.** Every write tool (`librarian_manifest_write`, `librarian_manifest_restore`, `librarian_seed_batch`, `librarian_seed_remove`) requires a two-step dance: the propose call returns a structured preview + a single-use token; the commit call must include that token AND the same content (fingerprinted). Tokens expire in 5 minutes. This is the code-rule that prevents an agent from auto-committing destructive changes — designed for the worst-case AI, not the best.
 
 ## Known limitations
 
