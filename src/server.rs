@@ -187,6 +187,12 @@ pub struct SeedParams {
     pub category: Option<String>,
     /// The tool list (as the agent sees it).
     pub tools: Vec<SeedTool>,
+    /// Set true to replace an existing index entry for this server.
+    /// Default false: refuse rather than silently overwrite a real probed entry.
+    /// For multi-server overwrites prefer `librarian_seed_batch`, which previews
+    /// every collision under a single user approval.
+    #[serde(default)]
+    pub overwrite: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -349,8 +355,11 @@ impl LibrarianServer {
         name = "librarian_seed_playbook",
         description = "Bootstrap a single server entry from the tool list you already see in your context. \
                        Use this for remote/cloud servers the librarian can't probe directly. \
+                       REFUSES to replace an existing index entry by default — pass `overwrite=true` \
+                       to confirm you intend to replace a probed or previously-seeded entry. \
                        For first-install onboarding of MANY hosted servers at once, prefer \
-                       `librarian_seed_batch` — one user approval covers the whole batch."
+                       `librarian_seed_batch` — one user approval covers the whole batch and \
+                       its preview shows every collision."
     )]
     async fn seed(&self, Parameters(p): Parameters<SeedParams>) -> Result<String, ErrorData> {
         self.seed_inner(p)
@@ -811,6 +820,7 @@ impl LibrarianServer {
         let now = Utc::now();
         let tool_count = p.tools.len();
         let server_name = p.server.clone();
+        let overwrite = p.overwrite;
         let tools: Vec<IndexedTool> = p
             .tools
             .into_iter()
@@ -839,9 +849,31 @@ impl LibrarianServer {
         };
 
         // Lock around load-modify-save so a concurrent seed/refresh doesn't
-        // produce a lost update.
+        // produce a lost update. Also load FIRST so the existing-entry check
+        // runs against the canonical on-disk state, not a stale snapshot.
         lockfile::with_write_lock(&self.paths, || {
             let mut index = Index::load(&self.paths.cache_file)?;
+            if !overwrite && let Some(existing) = index.servers.get(&server_name) {
+                let prior_status = match &existing.probe_status {
+                    ProbeStatus::Ok => "probed",
+                    ProbeStatus::Seeded => "seeded",
+                    ProbeStatus::ManifestOnly => "manifest-only",
+                    ProbeStatus::NotProbeable => "not-probeable",
+                    ProbeStatus::Timeout => "timed-out",
+                    ProbeStatus::Failed(_) => "failed",
+                };
+                let prior_tool_count = existing.tools.len();
+                anyhow::bail!(
+                    "Error: `{}` already exists in the index ({prior_status}, {prior_tool_count} tools). \
+                     `librarian_seed_playbook` refuses to overwrite by default so a probed entry \
+                     can't be silently replaced with arbitrary seed content. \
+                     Action: if this is genuinely a re-seed (e.g. the hosted tool list expanded), \
+                     re-call with `overwrite=true`. If you're seeding several servers at once, \
+                     `librarian_seed_batch` shows every collision in one preview under a single \
+                     user approval.",
+                    server_name,
+                );
+            }
             index.servers.insert(server_name.clone(), entry);
             index.save(&self.paths.cache_file)?;
             Ok(())
@@ -2396,6 +2428,7 @@ summary = "minimal"
                     required: vec![],
                     properties: Default::default(),
                 }],
+                overwrite: false,
             })
             .unwrap();
 
@@ -2432,6 +2465,7 @@ summary = "minimal"
                 summary: Some("to be removed".into()),
                 category: Some("comms".into()),
                 tools: vec![],
+                overwrite: false
             })
             .unwrap();
         assert!(
@@ -2482,6 +2516,88 @@ summary = "minimal"
     }
 
     #[test]
+    fn seed_refuses_overwrite_by_default() {
+        // The ungated fast path must NOT silently replace an existing index
+        // entry — that path was the worst-case-AI hole the v0.2.0 audit
+        // flagged. A second seed with overwrite=false must reject with an
+        // actionable error pointing at the overwrite flag and seed_batch.
+        let (_tmp, paths) = test_paths();
+        let server = LibrarianServer::new(paths);
+        server
+            .seed_inner(SeedParams {
+                server: "collide".into(),
+                summary: Some("first".into()),
+                category: None,
+                tools: vec![SeedTool {
+                    name: "t1".into(),
+                    description: "real".into(),
+                    required: vec![],
+                    properties: Default::default(),
+                }],
+                overwrite: false,
+            })
+            .unwrap();
+        let err = server
+            .seed_inner(SeedParams {
+                server: "collide".into(),
+                summary: Some("would replace".into()),
+                category: None,
+                tools: vec![],
+                overwrite: false,
+            })
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Error:")
+                && msg.contains("already exists")
+                && msg.contains("overwrite=true")
+                && msg.contains("seed_batch"),
+            "expected refusal pointing at overwrite + seed_batch, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn seed_with_overwrite_true_replaces() {
+        // The escape hatch: when the agent genuinely intends to replace,
+        // overwrite=true must succeed and the new content must win.
+        let (_tmp, paths) = test_paths();
+        let server = LibrarianServer::new(paths.clone());
+        server
+            .seed_inner(SeedParams {
+                server: "collide".into(),
+                summary: Some("first".into()),
+                category: None,
+                tools: vec![SeedTool {
+                    name: "t1".into(),
+                    description: "".into(),
+                    required: vec![],
+                    properties: Default::default(),
+                }],
+                overwrite: false,
+            })
+            .unwrap();
+        server
+            .seed_inner(SeedParams {
+                server: "collide".into(),
+                summary: Some("replaced".into()),
+                category: None,
+                tools: vec![SeedTool {
+                    name: "t2".into(),
+                    description: "".into(),
+                    required: vec![],
+                    properties: Default::default(),
+                }],
+                overwrite: true,
+            })
+            .unwrap();
+        let idx = crate::index::Index::load(&paths.cache_file).unwrap();
+        let entry = idx.servers.get("collide").unwrap();
+        assert_eq!(entry.summary.as_deref(), Some("replaced"));
+        assert_eq!(entry.tools.len(), 1);
+        assert_eq!(entry.tools[0].name, "t2");
+    }
+
+    #[test]
     fn seed_remove_warns_when_manifest_exists() {
         let (_tmp, paths) = test_paths();
         let server = LibrarianServer::new(paths.clone());
@@ -2492,6 +2608,7 @@ summary = "minimal"
                 summary: Some("seeded".into()),
                 category: None,
                 tools: vec![],
+                overwrite: false
             })
             .unwrap();
         // And write a manifest for the same name
@@ -2532,6 +2649,7 @@ summary = "minimal"
                     summary: None,
                     category: None,
                     tools: vec![],
+                    overwrite: false
                 })
                 .unwrap();
         }
@@ -2569,12 +2687,14 @@ summary = "minimal"
                         required: vec![],
                         properties: Default::default(),
                     }],
+                    overwrite: false,
                 },
                 SeedParams {
                     server: "claude.ai_Bar".into(),
                     summary: Some("Bar MCP".into()),
                     category: Some("knowledge".into()),
                     tools: vec![],
+                    overwrite: false,
                 },
             ],
             confirm_token: None,
@@ -2612,12 +2732,14 @@ summary = "minimal"
                     required: vec![],
                     properties: Default::default(),
                 }],
+                overwrite: false,
             },
             SeedParams {
                 server: "claude.ai_Two".into(),
                 summary: Some("Two".into()),
                 category: Some("knowledge".into()),
                 tools: vec![],
+                overwrite: false,
             },
         ];
         let propose = server
@@ -2650,6 +2772,7 @@ summary = "minimal"
             summary: Some("X".into()),
             category: None,
             tools: vec![],
+            overwrite: false,
         }];
         let propose = server
             .seed_batch_inner(SeedBatchParams {
@@ -2665,6 +2788,7 @@ summary = "minimal"
             summary: Some("Different".into()),
             category: None,
             tools: vec![],
+            overwrite: false,
         }];
         let err = server
             .seed_batch_inner(SeedBatchParams {
@@ -2687,12 +2811,14 @@ summary = "minimal"
                         summary: None,
                         category: None,
                         tools: vec![],
+                        overwrite: false,
                     },
                     SeedParams {
                         server: "dup".into(),
                         summary: None,
                         category: None,
                         tools: vec![],
+                        overwrite: false,
                     },
                 ],
                 confirm_token: None,
@@ -2713,12 +2839,14 @@ summary = "minimal"
                         summary: None,
                         category: None,
                         tools: vec![],
+                        overwrite: false,
                     },
                     SeedParams {
                         server: "../escape".into(),
                         summary: None,
                         category: None,
                         tools: vec![],
+                        overwrite: false,
                     },
                 ],
                 confirm_token: None,
@@ -2739,6 +2867,7 @@ summary = "minimal"
                 summary: Some("existing".into()),
                 category: Some("comms".into()),
                 tools: vec![],
+                overwrite: false
             })
             .unwrap();
         // Now propose a batch that collides with it.
@@ -2750,12 +2879,14 @@ summary = "minimal"
                         summary: Some("new content".into()),
                         category: Some("comms".into()),
                         tools: vec![],
+                        overwrite: false,
                     },
                     SeedParams {
                         server: "claude.ai_New".into(),
                         summary: Some("brand new".into()),
                         category: None,
                         tools: vec![],
+                        overwrite: false,
                     },
                 ],
                 confirm_token: None,
@@ -2801,6 +2932,7 @@ summary = "minimal"
                 summary: None,
                 category: None,
                 tools: vec![],
+                overwrite: false
             })
             .unwrap_err();
         let msg = format!("{err:#}");
@@ -3151,6 +3283,7 @@ summary = "minimal"
                         properties: Default::default(),
                     },
                 ],
+                overwrite: false,
             })
             .unwrap();
         server
@@ -3164,6 +3297,7 @@ summary = "minimal"
                     required: vec![],
                     properties: Default::default(),
                 }],
+                overwrite: false,
             })
             .unwrap();
 
@@ -3232,6 +3366,7 @@ summary = "minimal"
                     required: vec![],
                     properties: Default::default(),
                 }],
+                overwrite: false,
             })
             .unwrap();
         server
@@ -3245,6 +3380,7 @@ summary = "minimal"
                     required: vec![],
                     properties: Default::default(),
                 }],
+                overwrite: false,
             })
             .unwrap();
         crate::playbook::write_manifest(
@@ -3305,6 +3441,7 @@ summary = "minimal"
                     required: vec![],
                     properties: Default::default(),
                 }],
+                overwrite: false,
             })
             .unwrap();
         // Alias points at `ghost_tool` which isn't in the seeded tool list.
@@ -3424,6 +3561,7 @@ summary = "minimal"
                         properties: Default::default(),
                     },
                 ],
+                overwrite: false,
             })
             .unwrap();
         crate::playbook::write_manifest(
