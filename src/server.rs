@@ -2465,7 +2465,7 @@ summary = "minimal"
                 summary: Some("to be removed".into()),
                 category: Some("comms".into()),
                 tools: vec![],
-                overwrite: false
+                overwrite: false,
             })
             .unwrap();
         assert!(
@@ -2608,7 +2608,7 @@ summary = "minimal"
                 summary: Some("seeded".into()),
                 category: None,
                 tools: vec![],
-                overwrite: false
+                overwrite: false,
             })
             .unwrap();
         // And write a manifest for the same name
@@ -2649,7 +2649,7 @@ summary = "minimal"
                     summary: None,
                     category: None,
                     tools: vec![],
-                    overwrite: false
+                    overwrite: false,
                 })
                 .unwrap();
         }
@@ -2867,7 +2867,7 @@ summary = "minimal"
                 summary: Some("existing".into()),
                 category: Some("comms".into()),
                 tools: vec![],
-                overwrite: false
+                overwrite: false,
             })
             .unwrap();
         // Now propose a batch that collides with it.
@@ -2932,7 +2932,7 @@ summary = "minimal"
                 summary: None,
                 category: None,
                 tools: vec![],
-                overwrite: false
+                overwrite: false,
             })
             .unwrap_err();
         let msg = format!("{err:#}");
