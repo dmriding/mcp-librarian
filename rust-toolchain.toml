@@ -1,0 +1,9 @@
+# Pinned toolchain — local builds, contributor builds, and CI all use the
+# same compiler so new clippy lints don't surprise-fail CI.
+#
+# Bumping policy: bump deliberately (e.g. monthly), review new clippy lints
+# in the same PR. Don't auto-track stable.
+[toolchain]
+channel = "1.96.0"
+components = ["clippy", "rustfmt"]
+profile = "minimal"
