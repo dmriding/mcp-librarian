@@ -63,6 +63,19 @@ pub struct ArgSummary {
 }
 
 impl Index {
+    /// Load the index from disk. Readers do not take the write lock — they rely
+    /// on the all-or-nothing semantics of `std::fs::read` + `Self::save`'s
+    /// atomic-rename pattern:
+    /// - `save` writes the new content to a `.tmp` sibling, then renames over
+    ///   the target. On every supported OS the rename is a single atomic
+    ///   directory entry swap.
+    /// - `load` calls `std::fs::read`, which is a single syscall returning the
+    ///   entire file's bytes from one inode. It cannot observe the in-progress
+    ///   state of a concurrent rename: either the syscall sees the old inode
+    ///   (fully-old content) or the new inode (fully-new content), never a mix.
+    ///
+    /// Keep this function a single `fs::read` — switching to a streamed read
+    /// would void the invariant.
     pub fn load(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::default());
