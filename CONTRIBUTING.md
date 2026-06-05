@@ -82,7 +82,7 @@ fix(area): one-line description
 docs(area): one-line description
 ```
 
-Areas in use: `manifest`, `seed`, `note`, `help`, `list`, `search`, `fetch`, `concurrency`, `security`, `readme`. Add a new area if none fit.
+Areas track the rough subsystem touched (e.g. `manifest`, `seed`, `note`, `search`, `fetch`, `security`, `dx`, `readme`). Add a new area if none of the existing ones fit — keep it lowercase and one word.
 
 If a commit really needs a body (multi-step refactor, non-obvious tradeoff), keep it under 8 lines and explain the *why*, not the *what*. The diff shows what changed.
 
