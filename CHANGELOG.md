@@ -4,13 +4,17 @@ All notable changes to this project will be documented here. Format follows [Kee
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-06-05
+
+Hardening pass: closes the one ungated overwrite path on the librarian surface, routes CLI refresh through the same write-lock as the MCP handler, and turns `extra_urls` rate-limit failures into waits so multi-page same-domain fetches work as documented.
+
 ### Security
-- **`librarian_seed_playbook` refuses to overwrite an existing index entry by default** ([codex review](docs/adversarial_review.md)). Without this gate, a confused or prompt-injected agent could call `librarian_seed_playbook(server="<existing_name>", tools=[])` and silently replace a real probed entry with arbitrary seed content — the only ungated write path on the librarian surface. New `overwrite: bool` parameter (default false) opts into deliberate replacement; rejection points the agent at `librarian_seed_batch` for multi-server overwrites under a single user approval.
+- **`librarian_seed_playbook` refuses to overwrite an existing index entry by default.** Without this gate, a confused or prompt-injected agent could call `librarian_seed_playbook(server="<existing_name>", tools=[])` and silently replace a real probed entry with arbitrary seed content — the only ungated write path on the librarian surface. New `overwrite: bool` parameter (default false) opts into deliberate replacement; rejection points the agent at `librarian_seed_batch` for multi-server overwrites under a single user approval.
 
 ### Fixed
-- CLI `mcp-librarian refresh` now routes its index merge + write through `with_write_lock`. The MCP `librarian_refresh` handler already did; running CLI refresh while a Claude client was writing concurrently could lose updates. Probing still happens outside the lock so the lock isn't held across slow child-process spawns.
+- CLI `mcp-librarian refresh` now routes its index merge + write through `with_write_lock`. The MCP `librarian_refresh` handler already did; running CLI refresh while a Claude client was writing concurrently could lose updates. Probing still happens outside the lock so it isn't held across slow child-process spawns.
 - `librarian_fetch_docs` now **waits** for the per-domain rate-limit slot instead of bailing with `Error: rate-limited`. Multi-page same-domain `extra_urls` batches (the documented use case for vendor docs) work end-to-end. The wait is capped at 30 seconds total per call so a pathological queue can't stall indefinitely.
-- `SECURITY.md` no longer references the 0.1.0-era `invalid_params` JSON-RPC error code for validation failures; the diagnostics-as-content shape that shipped in 0.2.0 is now documented here too.
+- `SECURITY.md` no longer references the 0.1.0-era `invalid_params` JSON-RPC error code for validation failures; the diagnostics-as-content shape shipped in 0.2.0 is now documented in the threat model too.
 - `README.md` headline security claim (formerly "single-use tokens with content fingerprints on every write") is now accurate about which write paths are token-gated and which (`seed_playbook`, `note`) are not.
 - CI now runs `cargo deny check` as a blocking job, matching the dependency policy in `CONTRIBUTING.md`. Previously the policy was advertised but only enforced locally.
 
@@ -111,6 +115,7 @@ First public version. Everything below is shipped on `main` and exercised agains
 - DNS rebinding is not mitigated (would require IP pinning that `reqwest` doesn't expose cleanly)
 - Single-host only; no clustering, no shared state across machines
 
-[Unreleased]: https://github.com/dmriding/mcp-librarian/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/dmriding/mcp-librarian/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/dmriding/mcp-librarian/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/dmriding/mcp-librarian/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/dmriding/mcp-librarian/releases/tag/v0.1.0
