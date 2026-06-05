@@ -2,10 +2,16 @@
 name = "mcp-librarian"
 version = "0.2.0"
 edition = "2024"
+rust-version = "1.85"
 description = "An MCP server that indexes your other MCP servers and emits playbooks on demand."
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/dmriding/mcp-librarian"
+homepage = "https://github.com/dmriding/mcp-librarian"
+documentation = "https://github.com/dmriding/mcp-librarian#readme"
+authors = ["David Riding <david@netviper.gr>"]
+keywords = ["mcp", "claude", "agent", "playbook", "indexer"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "mcp-librarian"
