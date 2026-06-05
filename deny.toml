@@ -1,0 +1,45 @@
+# cargo-deny configuration — https://embarkstudios.github.io/cargo-deny/
+#
+# This file enforces the dependency policy described in CONTRIBUTING.md.
+# Run via `cargo deny check`.
+
+[graph]
+all-features = true
+
+[advisories]
+yanked = "deny"
+ignore = [
+    # paste 1.0.15 is unmaintained; reaches us via rmcp 0.8.x. Not a CVE.
+    # Will clear when rmcp bumps to a version that drops paste, expected
+    # in the rmcp 0.9+ cycle.
+    "RUSTSEC-2024-0436",
+]
+
+[licenses]
+# Permissive-licensed deps only. Add new licenses here with a one-line
+# rationale rather than reaching for `confidence-threshold` overrides.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "MPL-2.0",
+    "0BSD",
+    # CDLA-Permissive-2.0: webpki-roots ships the Mozilla CA bundle under
+    # this license. It's permissive ("use for any purpose"); the relevant
+    # *code* in webpki-roots is MIT.
+    "CDLA-Permissive-2.0",
+]
+
+[bans]
+multiple-versions = "warn"
+# Wildcards reduce reproducibility; we use caret ranges everywhere.
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -8,6 +8,12 @@ This is a personal tool, open-sourced because someone else might want it. The po
 
 ---
 
+## Dependency policy
+
+Caret ranges in `Cargo.toml` (`"0.8"`, not `"0.8.0"` or `"0.8.*"`), `Cargo.lock` committed for reproducibility. New dependencies need a one-line "why" in the PR description. `cargo audit` runs as an advisory CI job — surfaces CVEs without blocking every push. `cargo deny check` (config in [deny.toml](deny.toml)) enforces the license allow-list and bans wildcard versions.
+
+---
+
 ## Quick dev loop
 
 ```powershell
