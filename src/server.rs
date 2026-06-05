@@ -26,6 +26,25 @@ use crate::probe;
 /// this window after the user approves; otherwise re-propose.
 const PENDING_WRITE_TTL_SECS: i64 = 5 * 60;
 
+/// Hard cap on `manifest_toml` input bytes. Real manifests for the busiest
+/// hosted servers (Notion's 14 tools etc.) land well under 16 KiB authored.
+/// 256 KiB is ~16x the worst real case, large enough that no honest workflow
+/// hits it, small enough that an adversarial agent cannot exhaust parser
+/// memory via a deeply-nested or pathological TOML payload. Enforced at the
+/// `librarian_manifest_write` tool entry before `toml::from_str` runs.
+const MAX_MANIFEST_TOML_BYTES: usize = 256 * 1024;
+
+/// Hard cap on `librarian_note` `claim` bytes. Notes are convention-prose,
+/// roughly one sentence. 8 KiB is generous; anything bigger is the agent
+/// pasting raw blobs into the notes file (an anti-pattern the cap nudges
+/// away from).
+const MAX_CLAIM_BYTES: usize = 8 * 1024;
+
+/// Hard cap on `extra_urls` count for `librarian_fetch_docs`. Each URL costs
+/// a network round trip and up to `MAX_RESPONSE_BYTES`; capping the count
+/// bounds the per-call wall time and memory footprint.
+const MAX_EXTRA_URLS: usize = 16;
+
 /// A pending mutation awaiting commit. The action variant pins what the user
 /// approved — committing a different shape of action rejects.
 #[derive(Clone)]
@@ -703,6 +722,16 @@ impl LibrarianServer {
 
     fn note_inner(&self, p: NoteParams) -> Result<String> {
         validate_server_name(&p.server)?;
+        if p.claim.len() > MAX_CLAIM_BYTES {
+            anyhow::bail!(
+                "Error: `claim` is {} bytes; cap is {} bytes. \
+                 Action: `claim` is convention-prose (a sentence or two describing one observation), \
+                 not a paste of raw arg blobs. If you really need to file a long claim, split it \
+                 into multiple focused notes.",
+                p.claim.len(),
+                MAX_CLAIM_BYTES,
+            );
+        }
         // The read-check-write sequence below MUST be atomic across processes,
         // or two clients writing the same observation concurrently can both
         // pass the dedup check before either commits and produce duplicates —
@@ -1247,6 +1276,19 @@ impl LibrarianServer {
 impl LibrarianServer {
     fn manifest_write_inner(&self, p: ManifestWriteParams) -> Result<String> {
         validate_server_name(&p.server)?;
+        if let Some(toml_str) = p.manifest_toml.as_deref()
+            && toml_str.len() > MAX_MANIFEST_TOML_BYTES
+        {
+            anyhow::bail!(
+                "Error: `manifest_toml` is {} bytes; cap is {} bytes. \
+                 Action: real manifests for the busiest known servers land under 16 KiB. \
+                 If you're hitting 256 KiB you likely embedded raw content that belongs \
+                 elsewhere (a `librarian_note`, a `topic.body` excerpt, or no manifest at all). \
+                 Trim and retry.",
+                toml_str.len(),
+                MAX_MANIFEST_TOML_BYTES,
+            );
+        }
         // Guard 0: exactly one input form must be provided. Parse TOML if given;
         // otherwise use the structured value. TOML is preferred because nested JSON
         // with embedded newlines causes some MCP clients to hang during serialization.
@@ -1610,6 +1652,16 @@ impl LibrarianServer {
 
 impl LibrarianServer {
     async fn fetch_docs_inner(&self, p: FetchDocsParams) -> Result<String> {
+        if p.extra_urls.len() > MAX_EXTRA_URLS {
+            anyhow::bail!(
+                "Error: `extra_urls` has {} entries; cap is {}. \
+                 Action: fetch in batches. The cap exists because each URL costs a network \
+                 round trip and up to 5 MiB of response memory; uncapped, a single call could \
+                 stall for minutes.",
+                p.extra_urls.len(),
+                MAX_EXTRA_URLS,
+            );
+        }
         let max_chars = p.max_chars.unwrap_or(fetch::DEFAULT_MAX_CHARS);
         let mut out = String::new();
 
@@ -3438,6 +3490,113 @@ summary = "minimal"
         assert_eq!(
             codeview_alias_score, 0,
             "alias must not boost a tool when query has zero overlap with phrases"
+        );
+    }
+
+    // --- Phase 5: input-size caps at the tool boundary ---
+
+    #[test]
+    fn note_rejects_oversized_claim() {
+        let (_tmp, paths) = test_paths();
+        let server = LibrarianServer::new(paths);
+        let oversized = "x".repeat(MAX_CLAIM_BYTES + 1);
+        let err = server
+            .note_inner(NoteParams {
+                server: "demo".into(),
+                tool: Some("foo".into()),
+                topic: None,
+                kind: NoteKind::Tip,
+                basis: NoteBasis::Observed,
+                claim: oversized,
+                tags: vec![],
+                allow_duplicate: false,
+            })
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Error:") && msg.contains("claim") && msg.contains("cap is"),
+            "expected actionable size-cap error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn note_accepts_claim_at_cap_boundary() {
+        let (_tmp, paths) = test_paths();
+        let server = LibrarianServer::new(paths);
+        // Exactly at the cap (not over) must succeed.
+        let at_cap = "y".repeat(MAX_CLAIM_BYTES);
+        server
+            .note_inner(NoteParams {
+                server: "demo".into(),
+                tool: Some("foo".into()),
+                topic: None,
+                kind: NoteKind::Tip,
+                basis: NoteBasis::Observed,
+                claim: at_cap,
+                tags: vec![],
+                allow_duplicate: false,
+            })
+            .expect("claim at the cap boundary should be accepted");
+    }
+
+    #[test]
+    fn manifest_write_rejects_oversized_toml() {
+        let (_tmp, paths) = test_paths();
+        let server = LibrarianServer::new(paths);
+        // Build a TOML body whose total length exceeds the cap. Padding the
+        // summary string with `x`s is the simplest way to overshoot.
+        let padding = "x".repeat(MAX_MANIFEST_TOML_BYTES + 1);
+        let oversized_toml = format!("[meta]\nsummary = \"{padding}\"\n");
+        let err = server
+            .manifest_write_inner(ManifestWriteParams {
+                server: "demo".into(),
+                manifest_toml: Some(oversized_toml),
+                manifest: None,
+                confirm_token: None,
+                overwrite: false,
+            })
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Error:") && msg.contains("manifest_toml") && msg.contains("cap is"),
+            "expected actionable size-cap error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn fetch_docs_rejects_too_many_extra_urls() {
+        let (_tmp, paths) = test_paths();
+        let server = LibrarianServer::new(paths);
+        let urls: Vec<String> = (0..(MAX_EXTRA_URLS + 1))
+            .map(|i| format!("https://example.com/{i}"))
+            .collect();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let err = rt.block_on(async move {
+            server
+                .fetch_docs_inner(FetchDocsParams {
+                    url: "https://example.com/main".into(),
+                    extra_urls: urls,
+                    max_chars: None,
+                })
+                .await
+                .unwrap_err()
+        });
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Error:") && msg.contains("extra_urls") && msg.contains("cap is"),
+            "expected actionable count-cap error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn manifest_fingerprint_is_non_empty_for_default() {
+        // The propose/commit gate relies on a stable, non-empty fingerprint
+        // to detect content drift between propose and commit. An empty
+        // fingerprint would mean two distinct manifests collide.
+        let fp = crate::playbook::manifest_fingerprint(&Manifest::default());
+        assert!(
+            !fp.is_empty(),
+            "manifest_fingerprint must never return empty; got {fp:?}"
         );
     }
 }

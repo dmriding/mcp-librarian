@@ -1266,8 +1266,14 @@ pub fn render_manifest_preview(
 
 /// Canonical serialization for comparing two manifests by value. Used to verify
 /// that a commit-mode call carries the same content the user approved.
+///
+/// Serialization of an in-memory Manifest is infallible in practice (no maps
+/// with non-string keys, no NaN floats). If it ever fails, that's a programmer
+/// error worth surfacing — silent collapse to `""` would mean two distinct
+/// manifests could share an empty fingerprint and the propose/commit gate
+/// would wave the second through.
 pub fn manifest_fingerprint(m: &Manifest) -> String {
-    serde_json::to_string(m).unwrap_or_default()
+    serde_json::to_string(m).expect("manifest serialization is infallible")
 }
 
 // =================== Cache wrappers (convenience for server.rs) ===================
