@@ -625,9 +625,10 @@ impl LibrarianServer {
                     rank(&q, &q_tokens, &tool.name, &tool.description, &aliases_haystack);
                 // Per-phrase bonus: a phrase whose meaningful tokens densely
                 // match the query is stronger signal than scattered token hits
-                // across the cat'd haystack. Closes the noisy-query gap from
-                // docs/round2.md where alias-only tools got squeezed below
-                // hosted *_search_* tools with one shared name token.
+                // across the cat'd haystack. Closes the noisy-query gap where
+                // alias-only tools (e.g. `outline`) got squeezed below hosted
+                // `*_search_*` tools that share a single common name token
+                // ("search") with a multi-intent query.
                 score += phrase_overlap_bonus(&phrases, &q);
                 if score > 0 {
                     hits.push((
@@ -835,8 +836,9 @@ impl LibrarianServer {
                 // combine em-dashes, angle-bracket placeholders, and nested
                 // backticks. Keep this body character-conservative: ASCII hyphens
                 // only, no `<x>` placeholders, no backticks around content that
-                // already contains punctuation. See docs/tech_debt.md for the
-                // full background.
+                // already contains punctuation. The regression tests in
+                // `tests/integration.rs` assert no known hang-triggering glyphs
+                // appear in this preview.
                 let safe_summary = sanitize_for_preview(entry.summary.as_deref());
 
                 let mut preview = String::new();
@@ -1828,7 +1830,7 @@ fn collect_alias_phrases_for_tool(manifest: Option<&Manifest>, tool_name: &str) 
 ///
 /// A phrase must have ≥2 meaningful tokens AND at least 2 of them must
 /// appear in the query (≥50% overlap) for the bonus to fire. This is
-/// the right calibration for the failure documented in `docs/round2.md`:
+/// the right calibration for the alias-vs-name-collision failure mode:
 /// an alias phrase like `"where is X defined"` (meaningful tokens after
 /// stop-word/placeholder filtering: [`where`, `defined`]) fully matched
 /// against the query lifts the tool above unrelated single-name-token
@@ -2979,10 +2981,10 @@ summary = "minimal"
 
     #[test]
     fn rank_alias_phrase_boosts_above_unrelated_name_match() {
-        // The reported failure case from docs/round2.md: a query whose
-        // intent words don't match the right tool's name, but DO match
-        // an authored alias. The aliased tool must outrank a tool whose
-        // name happens to contain a generic search term.
+        // Alias-routing failure mode: a query whose intent words don't
+        // match the right tool's name, but DO match an authored alias.
+        // The aliased tool must outrank a tool whose name happens to
+        // contain a generic search term.
         let q = "where is a function defined";
         let tokens: Vec<&str> = q.split_whitespace().collect();
         // `outline` has no description and no token overlap with the query.
@@ -3009,7 +3011,7 @@ summary = "minimal"
 
     #[test]
     fn search_with_tool_aliases_surfaces_codeview_above_lexical_noise() {
-        // End-to-end repro of the docs/round2.md failure: an intent-style
+        // End-to-end repro of the alias-routing failure: an intent-style
         // query whose meaningful tokens don't overlap with the right tool's
         // name. With an authored alias on the right tool, search must rank
         // it above unrelated tools whose names happen to contain a token
@@ -3233,8 +3235,9 @@ summary = "minimal"
 
     #[test]
     fn phrase_overlap_bonus_fires_on_dense_match() {
-        // The outline alias set from docs/round2.md. After stop-word and
-        // short-token filtering: "where is X defined" -> [where, defined].
+        // Canonical outline alias set used as a fixture in alias tests.
+        // After stop-word and short-token filtering:
+        // "where is X defined" -> [where, defined].
         // Query "where is a function defined" contains both -> 2/2 -> +40.
         // "find function" -> [find, function]; only "function" in query
         // -> 1/2 -> below the matched>=2 floor -> 0.
@@ -3283,12 +3286,12 @@ summary = "minimal"
 
     #[test]
     fn search_outline_above_grep_in_pure_intent_query() {
-        // Tighter version of the docs/round2.md follow-up: when the query
-        // is pure intent (no "search"/"grep" lexical noise), outline must
-        // win on its alias phrase match. This is the query CD ran to isolate
-        // the alias effect — outline ranked #1 there, but in the noisy
-        // mixed query it fell out of the top 10. The phrase bonus is the
-        // mechanism that keeps it in contention even when noise is mixed in.
+        // Isolated alias-effect test: when the query is pure intent (no
+        // "search"/"grep" lexical noise), outline must win on its alias
+        // phrase match. Counterpart to the noisy-query test above where
+        // outline rides on aliases alone and competes with multiple
+        // name-token matches — the phrase bonus is the mechanism that
+        // keeps it in contention even when noise is mixed in.
         use rmcp::handler::server::wrapper::Parameters;
         let (_tmp, paths) = test_paths();
         let server = LibrarianServer::new(paths.clone());
