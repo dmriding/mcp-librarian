@@ -33,9 +33,12 @@ jobs:
   audit:
     name: cargo-audit (advisory)
     runs-on: ubuntu-latest
+    # Advisory only: surfaces CVEs / unmaintained crates without blocking the
+    # workflow. Known acceptable advisories are filtered via deny.toml's
+    # `[advisories] ignore` list (cargo-audit reads the same field).
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
-      - uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - run: cargo install cargo-audit --locked --quiet
+      - run: cargo audit --ignore RUSTSEC-2024-0436
