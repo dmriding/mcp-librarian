@@ -42,3 +42,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.96.0
       - run: cargo install cargo-audit --locked --quiet
       - run: cargo audit --ignore RUSTSEC-2024-0436
+
+  deny:
+    name: cargo-deny (licenses + bans + sources)
+    runs-on: ubuntu-latest
+    # Blocking: deny.toml is under our control, so any failure here is a
+    # policy violation we want surfaced as a hard stop, not an advisory.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - run: cargo install cargo-deny --locked --quiet
+      - run: cargo deny check
