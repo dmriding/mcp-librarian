@@ -2,7 +2,7 @@
 
 > An MCP server that indexes your other MCP servers and emits playbooks on demand.
 
-I built this for me, and I run it daily with Claude Code and Codex. Patches welcome; feature requests without patches will be politely declined.
+I built this for me; I run it daily with Claude Code and Codex. Patches welcome — feature requests without patches will be politely declined.
 
 ---
 
@@ -16,7 +16,7 @@ I built this for me, and I run it daily with Claude Code and Codex. Patches welc
 6. [A 60-second tour from the agent's POV](#a-60-second-tour-from-the-agents-pov)
 7. [Install](#install)
 8. [Configure (add to your MCP client)](#configure-add-to-your-mcp-client)
-9. [First run — index everything (Claude Code, Claude Desktop, Codex)](#first-run--index-everything)
+9. [First run — index everything](#first-run--index-everything)
 10. [The thirteen tools](#the-thirteen-tools)
 11. [Manifests — your canonical playbooks](#manifests--your-canonical-playbooks)
 12. [Workflow recipes](#workflow-recipes)
@@ -261,7 +261,7 @@ For the agent-facing version of this with workflows and gotchas, call `librarian
 
 ## Manifests — your canonical playbooks
 
-A manifest is a single TOML file at `<config>/manifests/<server>.toml`. Five sections, all optional:
+A manifest is a single TOML file at `<config>/manifests/<server>.toml`. Six sections, all optional (`gotchas`, `[meta]`, `[[tool_categories]]`, `[[workflows]]`, `[[topics]]`, `[[tool_aliases]]`):
 
 ```toml
 # Root-level (must come BEFORE any [section] header — TOML grammar requirement)

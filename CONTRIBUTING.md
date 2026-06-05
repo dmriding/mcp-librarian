@@ -10,29 +10,29 @@ This is a personal tool, open-sourced because someone else might want it. The po
 
 ## Dependency policy
 
-Caret ranges in `Cargo.toml` (`"0.8"`, not `"0.8.0"` or `"0.8.*"`), `Cargo.lock` committed for reproducibility. New dependencies need a one-line "why" in the PR description. `cargo audit` runs as an advisory CI job — surfaces CVEs without blocking every push. `cargo deny check` (config in [deny.toml](deny.toml)) enforces the license allow-list and bans wildcard versions.
+Use the shortest caret range that pins what you need — `"0.8"` rather than `"0.8.0"` when nothing in the patch line matters, and never `"0.8.*"` or other wildcards. `Cargo.lock` is committed for reproducibility. New dependencies need a one-line "why" in the PR description. `cargo audit` runs as an advisory CI job — surfaces CVEs without blocking every push. `cargo deny check` (config in [deny.toml](deny.toml)) enforces the license allow-list and bans wildcard versions.
 
 ---
 
 ## Quick dev loop
 
 ```powershell
-cargo build
-cargo test                                  # unit + integration
-cargo clippy --all-targets -- -D warnings   # zero warnings policy
-cargo build --release                       # binary at target/release/mcp-librarian.exe
+cargo test --all-targets                     # 69 unit + 72 integration
+cargo clippy --all-targets -- -D warnings    # zero-warnings policy
+cargo fmt --all -- --check                   # formatting clean
+cargo build --release                        # binary at target/release/mcp-librarian.exe
 ```
 
-A PR is ready when all three pass. CI is the same.
+A PR is ready when all four pass. CI runs the same set.
 
-For interactive testing against a live MCP client, the typical loop is:
+For interactive testing against a live MCP client:
 
 1. Stop the running MCP server process (the client's child process for `mcp-librarian`)
 2. `cargo build --release`
 3. Copy `target/release/mcp-librarian.exe` to wherever your client config points
 4. Restart your MCP client (Claude Code / Claude Desktop / Codex) so it spawns the new binary
 
-A scripted version of this lives outside the repo since deploy paths are user-specific.
+A scripted version of this loop lives outside the repo — deploy paths are user-specific.
 
 ---
 
@@ -51,11 +51,11 @@ src/
 ├── lockfile.rs       cross-process advisory write lock
 └── server.rs         the 13 MCP tools, all gated paths, all sanitization
 
-tests/integration.rs  shared-fixture integration tests (~65)
-                      (unit tests live inline #[cfg(test)] in their respective src/ files)
+tests/integration.rs  shared-fixture integration tests
+                      (unit tests live inline `#[cfg(test)]` in their respective src/ files)
 ```
 
-User-facing docs live in this repo root: [README](README.md), [CHANGELOG](CHANGELOG.md), [SECURITY](SECURITY.md), and this file. Design rationale and the running tech-debt notebook are author-private and don't ship in the repo.
+User-facing docs live in this repo root: [README](README.md), [CHANGELOG](CHANGELOG.md), [SECURITY](SECURITY.md), [CODE_OF_CONDUCT](CODE_OF_CONDUCT.md), and this file. Design rationale and the running tech-debt notebook are author-private and don't ship in the repo.
 
 ---
 
