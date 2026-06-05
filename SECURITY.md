@@ -29,6 +29,11 @@
 | **Sandbox escape from probed child processes** | `librarian_refresh` spawns stdio MCP servers from your client config. Those subprocesses run with your user privileges. Trust your MCP config like you trust any other config you opt into. |
 | **PII scrubbing in learned notes** | Convention is that `claim` is prose, not literal arg blobs. No automated redaction; agents shouldn't paste secrets into notes. If they do, the user can `rm <data>/learned/<server>.jsonl` to clear. |
 | **Cloud-sync exposure of `%APPDATA%\netviper\`** | If you sync your AppData to OneDrive Personal or similar, manifests and notes go along. The librarian doesn't choose where AppData lives. Be aware. |
+| **Same-nanosecond token collision** | `generate_token()` uses 16 hex chars of `Utc::now().timestamp_nanos_opt()`. Not cryptographically random by design. The token only gates a write the same process already authorized via the propose step; for a single-user local tool, the realistic adversary cannot observe the timestamp window. Two propose calls in the same nanosecond would collide and the second supplants the first — visible failure mode, user re-proposes. |
+| **Adversarial filesystem TOCTOU on manifest write** | The atomic write-temp-then-rename path assumes the manifests directory isn't under attacker control. If another local user already has write access to your `%APPDATA%\netviper\`, that implies full state compromise; we don't defend the symlink-swap variant of that case. |
+| **Backup history depth = 1** | Only one `.toml.bak` per server. Two consecutive bad commits lose the original. Trade-off: keeps on-disk state visible and simple. If you need deeper history, version `%APPDATA%\netviper\manifests\` with git. |
+| **TOML parser nesting depth** | We cap `manifest_toml` input size at 256 KiB at the tool boundary; beyond that, recursion bounds are the `toml` crate's responsibility. We don't impose a custom nesting cap. |
+| **Tool-boundary panics** | A panic in any inner function terminates the librarian process. Not wrapped in `catch_unwind` by design — a panic represents a logic bug, and surfacing it loudly is more useful than masking it. The MCP client will see the connection drop and reconnect. |
 
 ## Reporting a security issue
 
