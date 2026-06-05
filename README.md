@@ -381,7 +381,7 @@ Resolved via the [`directories`](https://docs.rs/directories) crate. On Windows:
 - Lock: `%APPDATA%\netviper\mcp-librarian\config\.librarian.lock`
 - Learned notes: `%LOCALAPPDATA%\netviper\mcp-librarian\data\learned\<server>.jsonl`
 
-macOS/Linux paths follow the same crate's conventions but are marked `TODO: verify` in the source — I'm on Windows; patches welcome.
+macOS/Linux paths follow the same crate's conventions. They compile and the release matrix workflow exercises them on every tag, but I'm on Windows day-to-day — corner cases on those platforms are best caught by reports + PRs.
 
 ## Environment & CLI
 

@@ -6,7 +6,7 @@ All notable changes to this project will be documented here. Format follows [Kee
 
 ## [0.2.0] - 2026-06-05
 
-First public release. Intent-aware search and directive session orientation; manifests gain an additive `tool_aliases` field; tool failures arrive as `Ok` content so no client renderer can swallow them; hard input caps at every write tool entry; pre-tag audit pass complete (docs, dependency hygiene, threat-model deferrals, concurrency stress tests).
+First public release. Intent-aware search and directive session orientation; manifests gain an additive `tool_aliases` field; tool failures arrive as `Ok` content so no client renderer can swallow them; hard input caps at every write tool entry; expanded documentation of threat-model deferrals and dependency hygiene.
 
 ### Added
 - **`tool_aliases` field on manifests** — manifest authors can attach intent phrases per tool (e.g. `outline` aliased to `["find function", "locate definition", "where is X defined"]`). Phrases are folded into `librarian_search` ranking so agents describing intent in natural language surface the right tool even when it shares no lexical tokens with the query. Backward-compatible (`#[serde(default)]`); existing manifests parse unchanged. Documented in `librarian_help("librarian", "manifest_schema")`.
@@ -25,7 +25,7 @@ First public release. Intent-aware search and directive session orientation; man
 - Rewrote the rmcp server `instructions` string (surfaced at session init by Claude Desktop / Claude Code / Codex) to open with directive framing: *"Orient before acting. Before calling any indexed MCP server's tools, call `librarian_help(server)`..."*. The prior text was informational and left the orient-first behavior opt-in.
 - `librarian_search` ranking now folds curated **intent phrases** into the score (see Added: `tool_aliases`). Alias hits rank between description and tool-name weight — curated phrases beat auto-descriptions but the tool's own name still wins for direct lookups.
 - `librarian_search` ranking adds a **per-phrase token-overlap bonus** on top of haystack-level alias scoring: when an alias phrase has ≥2 meaningful tokens and ≥50% of them appear in the query, the tool gets a phrase-level bonus so multi-word intent matches outrank tools that only share a single common token via their name.
-- Project-wide `cargo fmt` pass — first time formatting was applied across the codebase. No semantic changes.
+- Project-wide `cargo fmt` pass; no semantic changes.
 
 ### Fixed
 - Tool failures now return `Ok` MCP content with a leading `Error: …` prefix instead of JSON-RPC `error` envelopes. Claude Desktop swallows JSON-RPC errors on some renderer paths, hiding the actionable diagnostic; returning failures as normal tool output makes them visible to the agent and the user. Supersedes the `invalid_params` approach shipped in 0.1.0 for the user-facing cases.
