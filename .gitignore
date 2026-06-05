@@ -2,3 +2,19 @@
 /target
 /scripts
 /.claude
+
+# IDE
+.idea/
+.vscode/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Binaries / local artifacts
+*.exe
+
+# Env files (in case anyone ever adds one)
+.env
+.env.*
+*.local
