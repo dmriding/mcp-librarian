@@ -3599,4 +3599,134 @@ summary = "minimal"
             "manifest_fingerprint must never return empty; got {fp:?}"
         );
     }
+
+    // --- Phase 7: concurrency stress + unicode + empty-manifest robustness ---
+
+    #[test]
+    fn concurrent_note_writes_no_dupes_no_orphan_tmp() {
+        // Stress: 8 threads each file a DISTINCT note for the same server,
+        // hitting the write-lock + atomic-rename paths in tight succession.
+        // Asserts: every write succeeds, all 8 notes land on disk, and no
+        // stray `.tmp` artifacts are left behind in the learned dir.
+        const N: usize = 8;
+        let (_tmp, paths) = test_paths();
+        let server = Arc::new(LibrarianServer::new(paths.clone()));
+        let barrier = Arc::new(Barrier::new(N));
+
+        let handles: Vec<_> = (0..N)
+            .map(|i| {
+                let server = server.clone();
+                let barrier = barrier.clone();
+                thread::spawn(move || {
+                    barrier.wait();
+                    server.note_inner(NoteParams {
+                        server: "demo".into(),
+                        tool: Some(format!("tool_{i}")),
+                        topic: None,
+                        kind: NoteKind::Tip,
+                        basis: NoteBasis::Observed,
+                        claim: format!("distinct observation #{i}"),
+                        tags: vec![],
+                        allow_duplicate: false,
+                    })
+                })
+            })
+            .collect();
+
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let oks = results.iter().filter(|r| r.is_ok()).count();
+        assert_eq!(
+            oks, N,
+            "all {N} distinct concurrent notes should succeed; results={results:?}"
+        );
+
+        let notes = index::read_notes(&paths, "demo").unwrap();
+        assert_eq!(
+            notes.len(),
+            N,
+            "all {N} notes should land in storage; found {}",
+            notes.len()
+        );
+
+        // No `.tmp` orphans in the learned dir. The write-temp-then-rename
+        // path completes atomically; a leftover .tmp would indicate a race
+        // or a panic mid-write.
+        if paths.learned_dir.exists() {
+            let entries: Vec<_> = std::fs::read_dir(&paths.learned_dir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .collect();
+            let orphans: Vec<_> = entries
+                .iter()
+                .filter(|p| {
+                    p.extension()
+                        .and_then(|e| e.to_str())
+                        .map(|e| e == "tmp")
+                        .unwrap_or(false)
+                })
+                .collect();
+            assert!(
+                orphans.is_empty(),
+                "found orphaned tmp files after concurrent writes: {orphans:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_server_name_rejects_unicode_traps() {
+        use crate::config::validate_server_name;
+        // Even though validate_server_name's regex is already ASCII-only,
+        // pin the behavior with explicit test cases. These are the inputs
+        // most likely to slip past an ad-hoc loosening someone might try
+        // ("just allow basic Latin-1!") — the test fires immediately when
+        // the regex is widened.
+        let traps = [
+            "caf\u{00E9}",         // é (precomposed)
+            "cafe\u{0301}",        // é (decomposed: e + combining acute)
+            "demo\u{200D}name",    // zero-width joiner
+            "demo\u{FEFF}name",    // byte-order mark
+            "\u{0301}leading",     // combining mark at start
+            "demo\u{0008}",        // backspace
+            "demo\u{0000}",        // null byte
+            "\u{1F600}",           // emoji
+        ];
+        for input in traps {
+            let res = validate_server_name(input);
+            assert!(
+                res.is_err(),
+                "validate_server_name should reject Unicode trap {input:?}, but accepted it"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_manifest_round_trips_through_toml() {
+        // A fully-empty Manifest should serialize to TOML, parse back, and
+        // re-render without error. Guards against any subsystem assuming
+        // at least one tool category / workflow / topic / etc.
+        let original = Manifest::default();
+        let toml_str = toml::to_string(&original).expect("empty manifest serializes");
+        let parsed: Manifest =
+            toml::from_str(&toml_str).expect("empty manifest TOML parses back");
+        // Default round-trip equality: every section count must be zero.
+        assert_eq!(parsed.workflows.len(), 0);
+        assert_eq!(parsed.topics.len(), 0);
+        assert_eq!(parsed.tool_categories.len(), 0);
+        assert_eq!(parsed.gotchas.len(), 0);
+        assert_eq!(parsed.tool_aliases.len(), 0);
+        // Preview rendering must not panic on an empty manifest, and must
+        // surface the zero-gotcha nudge per the Phase 5 schema (a manifest
+        // with zero gotchas is the canonical case the nudge addresses).
+        let preview = crate::playbook::render_manifest_preview(
+            "demo",
+            &original,
+            std::path::Path::new("dummy.toml"),
+            None,
+        );
+        assert!(
+            preview.contains("Gotchas") && preview.contains("0"),
+            "preview must show explicit zero-gotcha count; got:\n{preview}"
+        );
+    }
 }
