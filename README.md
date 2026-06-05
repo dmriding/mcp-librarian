@@ -233,7 +233,7 @@ One approval covers everything. After the first run you have one tool call (`lib
 
 ### Running both Claude Code AND Claude Desktop?
 
-That works — they each spawn their own librarian process sharing the same data files. Cross-process writes are serialized via an advisory file lock (see [Concurrency](#security--storage)), so concurrent `librarian_note` / `librarian_manifest_write` / `librarian_refresh` calls won't corrupt state. Each client should still run `librarian_onboarding()` once on first install so the hosted servers visible to *that specific client* get seeded under names matching its prefixes.
+That works — they each spawn their own librarian process sharing the same data files. Cross-process writes are serialized via an advisory file lock (see [Security & storage](#security--storage)), so concurrent `librarian_note` / `librarian_manifest_write` / `librarian_refresh` calls won't corrupt state. Each client should still run `librarian_onboarding()` once on first install so the hosted servers visible to *that specific client* get seeded under names matching its prefixes.
 
 ## The thirteen tools
 
