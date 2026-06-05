@@ -715,7 +715,7 @@ impl LibrarianServer {
             }
         }
 
-        hits.sort_by(|a, b| b.3.cmp(&a.3));
+        hits.sort_by_key(|h| std::cmp::Reverse(h.3));
         hits.truncate(limit);
         Ok(playbook::render_search(&p.query, &hits))
     }
@@ -1666,7 +1666,7 @@ impl LibrarianServer {
         let mut out = String::new();
 
         let urls: Vec<String> = std::iter::once(p.url.clone())
-            .chain(p.extra_urls.into_iter())
+            .chain(p.extra_urls)
             .collect();
 
         for (i, url) in urls.iter().enumerate() {
