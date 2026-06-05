@@ -180,7 +180,9 @@ pub fn check_url_sync(url: &reqwest::Url) -> Result<()> {
 /// a private IP for the real fetch. Mitigated for the most common cases by
 /// the redirect-policy re-validation and is documented in the README.
 pub async fn resolve_and_check(url: &reqwest::Url) -> Result<()> {
-    let host = url.host_str().ok_or_else(|| anyhow!("URL has no host: `{url}`"))?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| anyhow!("URL has no host: `{url}`"))?;
     // If it's an IP literal, `check_url_sync` already handled it.
     if host.parse::<IpAddr>().is_ok() {
         return Ok(());
@@ -364,8 +366,7 @@ pub async fn fetch_docs(
     //    cache lookup so a poisoned cache file with a private URL can't
     //    accidentally serve content. The cache_key is hash(url), so if an
     //    agent passes the same private URL twice, both fail here.
-    let parsed = reqwest::Url::parse(url)
-        .with_context(|| format!("parsing URL `{url}`"))?;
+    let parsed = reqwest::Url::parse(url).with_context(|| format!("parsing URL `{url}`"))?;
     check_url_sync(&parsed)?;
 
     // 1. Cache hit short-circuits everything — free, no cap accounting.
@@ -567,7 +568,9 @@ mod tests {
         // Pass-through cases — non-blocked public addresses
         assert!(blocked_ip_reason(&IpAddr::from(Ipv4Addr::new(8, 8, 8, 8))).is_none());
         assert!(blocked_ip_reason(&IpAddr::from(Ipv4Addr::new(1, 1, 1, 1))).is_none());
-        assert!(blocked_ip_reason(&IpAddr::from(Ipv6Addr::from_str("2606:4700::1").unwrap())).is_none());
+        assert!(
+            blocked_ip_reason(&IpAddr::from(Ipv6Addr::from_str("2606:4700::1").unwrap())).is_none()
+        );
     }
 
     #[test]
@@ -679,6 +682,9 @@ mod tests {
         };
         write_cache(&path, &doc).unwrap();
         let loaded = read_cache(&path).unwrap();
-        assert!(loaded.is_none(), "expired cache entry should not be returned");
+        assert!(
+            loaded.is_none(),
+            "expired cache entry should not be returned"
+        );
     }
 }

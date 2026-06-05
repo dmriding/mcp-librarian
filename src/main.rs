@@ -36,9 +36,7 @@ enum Command {
         server: Option<String>,
     },
     /// Stub for future compaction of learned notes. Currently a no-op.
-    Compact {
-        server: String,
-    },
+    Compact { server: String },
 }
 
 fn init_tracing() {
@@ -66,9 +64,7 @@ async fn main() -> Result<()> {
         Command::List { category } => run_list(paths, category),
         Command::Refresh { server } => run_refresh(paths, server).await,
         Command::Compact { server } => {
-            println!(
-                "TODO: compaction of learned notes for '{server}' not implemented yet."
-            );
+            println!("TODO: compaction of learned notes for '{server}' not implemented yet.");
             Ok(())
         }
     }
@@ -93,7 +89,10 @@ fn run_print(paths: config::Paths, server: String, topic: Option<String>) -> Res
     let idx = index::Index::load(&paths.cache_file)?;
     let entry = match idx.servers.get(&server) {
         Some(e) => e.clone(),
-        None => match discovery::discover()?.into_iter().find(|c| c.name == server) {
+        None => match discovery::discover()?
+            .into_iter()
+            .find(|c| c.name == server)
+        {
             Some(cfg) => index::entry_from_unprobed(&cfg),
             None => anyhow::bail!("unknown server '{server}'"),
         },
@@ -159,12 +158,8 @@ async fn run_refresh(paths: config::Paths, server: Option<String>) -> Result<()>
         if let Some(old) = prior.servers.get(&entry.name) {
             let mut drifted_tools = Vec::new();
             for new_tool in &entry.tools {
-                if let Some(old_tool) =
-                    old.tools.iter().find(|t| t.name == new_tool.name)
-                    && index::Index::arg_shape_drifted(
-                        &old_tool.arg_summary,
-                        &new_tool.arg_summary,
-                    )
+                if let Some(old_tool) = old.tools.iter().find(|t| t.name == new_tool.name)
+                    && index::Index::arg_shape_drifted(&old_tool.arg_summary, &new_tool.arg_summary)
                 {
                     drifted_tools.push(new_tool.name.clone());
                 }

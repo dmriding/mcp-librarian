@@ -38,7 +38,10 @@ struct PendingWrite {
 #[derive(Clone)]
 enum PendingAction {
     /// The fingerprint pins the exact manifest content the user approved.
-    Write { fingerprint: String, overwrite: bool },
+    Write {
+        fingerprint: String,
+        overwrite: bool,
+    },
     /// Swap current ↔ backup for the named server.
     Restore,
     /// The user approved a specific list of servers to bulk-seed.
@@ -67,7 +70,10 @@ impl LibrarianServer {
     }
 
     fn issue_token(&self, pending: PendingWrite) -> String {
-        let mut map = self.pending_writes.lock().expect("pending_writes lock poisoned");
+        let mut map = self
+            .pending_writes
+            .lock()
+            .expect("pending_writes lock poisoned");
         cleanup_expired(&mut map);
         let token = generate_token();
         map.insert(token.clone(), pending);
@@ -75,7 +81,10 @@ impl LibrarianServer {
     }
 
     fn consume_token(&self, token: &str) -> Option<PendingWrite> {
-        let mut map = self.pending_writes.lock().expect("pending_writes lock poisoned");
+        let mut map = self
+            .pending_writes
+            .lock()
+            .expect("pending_writes lock poisoned");
         cleanup_expired(&mut map);
         map.remove(token)
     }
@@ -267,7 +276,8 @@ impl LibrarianServer {
                        Add `category` to filter. One call, agent knows the landscape."
     )]
     async fn list(&self, Parameters(p): Parameters<ListParams>) -> Result<String, ErrorData> {
-        self.list_inner(p).map_or_else(|e| Ok(format_diagnostic(e)), Ok)
+        self.list_inner(p)
+            .map_or_else(|e| Ok(format_diagnostic(e)), Ok)
     }
 
     #[tool(
@@ -291,7 +301,8 @@ impl LibrarianServer {
                        With topic = focused drill-down. Use `server=\"librarian\"` for the librarian itself."
     )]
     async fn help(&self, Parameters(p): Parameters<HelpParams>) -> Result<String, ErrorData> {
-        self.help_inner(p).map_or_else(|e| Ok(format_diagnostic(e)), Ok)
+        self.help_inner(p)
+            .map_or_else(|e| Ok(format_diagnostic(e)), Ok)
     }
 
     #[tool(
@@ -300,7 +311,8 @@ impl LibrarianServer {
                        Returns ranked (server, tool, summary) candidates — cheap to scan before paying for a full schema load."
     )]
     async fn search(&self, Parameters(p): Parameters<SearchParams>) -> Result<String, ErrorData> {
-        self.search_inner(p).map_or_else(|e| Ok(format_diagnostic(e)), Ok)
+        self.search_inner(p)
+            .map_or_else(|e| Ok(format_diagnostic(e)), Ok)
     }
 
     #[tool(
@@ -310,7 +322,8 @@ impl LibrarianServer {
                        This is how the librarian gets smarter with use."
     )]
     async fn note(&self, Parameters(p): Parameters<NoteParams>) -> Result<String, ErrorData> {
-        self.note_inner(p).map_or_else(|e| Ok(format_diagnostic(e)), Ok)
+        self.note_inner(p)
+            .map_or_else(|e| Ok(format_diagnostic(e)), Ok)
     }
 
     #[tool(
@@ -321,7 +334,8 @@ impl LibrarianServer {
                        `librarian_seed_batch` — one user approval covers the whole batch."
     )]
     async fn seed(&self, Parameters(p): Parameters<SeedParams>) -> Result<String, ErrorData> {
-        self.seed_inner(p).map_or_else(|e| Ok(format_diagnostic(e)), Ok)
+        self.seed_inner(p)
+            .map_or_else(|e| Ok(format_diagnostic(e)), Ok)
     }
 
     #[tool(
@@ -342,7 +356,8 @@ impl LibrarianServer {
         &self,
         Parameters(p): Parameters<SeedRemoveParams>,
     ) -> Result<String, ErrorData> {
-        self.seed_remove_inner(p).map_or_else(|e| Ok(format_diagnostic(e)), Ok)
+        self.seed_remove_inner(p)
+            .map_or_else(|e| Ok(format_diagnostic(e)), Ok)
     }
 
     #[tool(
@@ -363,7 +378,8 @@ impl LibrarianServer {
         &self,
         Parameters(p): Parameters<SeedBatchParams>,
     ) -> Result<String, ErrorData> {
-        self.seed_batch_inner(p).map_or_else(|e| Ok(format_diagnostic(e)), Ok)
+        self.seed_batch_inner(p)
+            .map_or_else(|e| Ok(format_diagnostic(e)), Ok)
     }
 
     #[tool(
@@ -372,7 +388,9 @@ impl LibrarianServer {
                        Cache is read-only on the hot path; refresh is always explicit."
     )]
     async fn refresh(&self, Parameters(p): Parameters<RefreshParams>) -> Result<String, ErrorData> {
-        self.refresh_inner(p).await.map_or_else(|e| Ok(format_diagnostic(e)), Ok)
+        self.refresh_inner(p)
+            .await
+            .map_or_else(|e| Ok(format_diagnostic(e)), Ok)
     }
 
     #[tool(
@@ -394,7 +412,8 @@ impl LibrarianServer {
         &self,
         Parameters(p): Parameters<ManifestWriteParams>,
     ) -> Result<String, ErrorData> {
-        self.manifest_write_inner(p).map_or_else(|e| Ok(format_diagnostic(e)), Ok)
+        self.manifest_write_inner(p)
+            .map_or_else(|e| Ok(format_diagnostic(e)), Ok)
     }
 
     #[tool(
@@ -408,7 +427,8 @@ impl LibrarianServer {
         &self,
         Parameters(p): Parameters<ManifestDiffParams>,
     ) -> Result<String, ErrorData> {
-        self.manifest_diff_inner(p).map_or_else(|e| Ok(format_diagnostic(e)), Ok)
+        self.manifest_diff_inner(p)
+            .map_or_else(|e| Ok(format_diagnostic(e)), Ok)
     }
 
     #[tool(
@@ -425,7 +445,8 @@ impl LibrarianServer {
         &self,
         Parameters(p): Parameters<ManifestRestoreParams>,
     ) -> Result<String, ErrorData> {
-        self.manifest_restore_inner(p).map_or_else(|e| Ok(format_diagnostic(e)), Ok)
+        self.manifest_restore_inner(p)
+            .map_or_else(|e| Ok(format_diagnostic(e)), Ok)
     }
 
     #[tool(
@@ -444,7 +465,9 @@ impl LibrarianServer {
         &self,
         Parameters(p): Parameters<FetchDocsParams>,
     ) -> Result<String, ErrorData> {
-        self.fetch_docs_inner(p).await.map_or_else(|e| Ok(format_diagnostic(e)), Ok)
+        self.fetch_docs_inner(p)
+            .await
+            .map_or_else(|e| Ok(format_diagnostic(e)), Ok)
     }
 }
 
@@ -613,16 +636,21 @@ impl LibrarianServer {
         // Pass 1: indexed servers — rank their probed tools by name + description,
         // boosted by any tool_aliases attached to the tool in the server's manifest.
         for entry in index.servers.values() {
-            let manifest = manifest_cache
-                .entry(entry.name.clone())
-                .or_insert_with(|| {
-                    playbook::load_manifest(&self.paths, &entry.name).ok().flatten()
-                });
+            let manifest = manifest_cache.entry(entry.name.clone()).or_insert_with(|| {
+                playbook::load_manifest(&self.paths, &entry.name)
+                    .ok()
+                    .flatten()
+            });
             for tool in &entry.tools {
                 let phrases = collect_alias_phrases_for_tool(manifest.as_ref(), &tool.name);
                 let aliases_haystack = phrases.join(" ");
-                let mut score =
-                    rank(&q, &q_tokens, &tool.name, &tool.description, &aliases_haystack);
+                let mut score = rank(
+                    &q,
+                    &q_tokens,
+                    &tool.name,
+                    &tool.description,
+                    &aliases_haystack,
+                );
                 // Per-phrase bonus: a phrase whose meaningful tokens densely
                 // match the query is stronger signal than scattered token hits
                 // across the cat'd haystack. Closes the noisy-query gap where
@@ -689,9 +717,7 @@ impl LibrarianServer {
                 let existing = index::read_notes(&self.paths, &p.server).unwrap_or_default();
                 let new_norm = normalize_claim(&p.claim);
                 if let Some(dup) = existing.iter().find(|n| {
-                    n.tool == p.tool
-                        && n.kind == p.kind
-                        && normalize_claim(&n.claim) == new_norm
+                    n.tool == p.tool && n.kind == p.kind && normalize_claim(&n.claim) == new_norm
                 }) {
                     let tool_clause = p
                         .tool
@@ -1079,9 +1105,7 @@ impl LibrarianServer {
                             .map(|t| IndexedTool {
                                 name: t.name.clone(),
                                 description: t.description.clone(),
-                                arg_summary: if t.required.is_empty()
-                                    && t.properties.is_empty()
-                                {
+                                arg_summary: if t.required.is_empty() && t.properties.is_empty() {
                                     None
                                 } else {
                                     Some(ArgSummary {
@@ -1202,7 +1226,13 @@ impl LibrarianServer {
                 }
 
                 index.save(&self.paths.cache_file)?;
-                Ok((probed_count, failed_count, remote_count, drift_note_total, drifted.len()))
+                Ok((
+                    probed_count,
+                    failed_count,
+                    remote_count,
+                    drift_note_total,
+                    drifted.len(),
+                ))
             })?;
 
         Ok(format!(
@@ -1343,7 +1373,10 @@ impl LibrarianServer {
                     );
                 }
                 let (token_fingerprint, token_overwrite) = match &pending.action {
-                    PendingAction::Write { fingerprint, overwrite } => (fingerprint, *overwrite),
+                    PendingAction::Write {
+                        fingerprint,
+                        overwrite,
+                    } => (fingerprint, *overwrite),
                     PendingAction::Restore
                     | PendingAction::SeedBatch { .. }
                     | PendingAction::SeedRemove => anyhow::bail!(
@@ -1393,9 +1426,17 @@ impl LibrarianServer {
                     p.server,
                     target.display(),
                     manifest.tool_categories.len(),
-                    if manifest.tool_categories.len() == 1 { "y" } else { "ies" },
+                    if manifest.tool_categories.len() == 1 {
+                        "y"
+                    } else {
+                        "ies"
+                    },
                     manifest.workflows.len(),
-                    if manifest.workflows.len() == 1 { "" } else { "s" },
+                    if manifest.workflows.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    },
                     manifest.topics.len(),
                     if manifest.topics.len() == 1 { "" } else { "s" },
                     manifest.gotchas.len(),
@@ -1495,10 +1536,8 @@ impl LibrarianServer {
                 );
                 match (&current, &backup) {
                     (Some(c), Some(b)) => {
-                        let (curr_t, bak_t) =
-                            playbook::manifest_mtimes(&self.paths, &p.server);
-                        let (curr_label, bak_label) =
-                            playbook::format_mtime_pair(curr_t, bak_t);
+                        let (curr_t, bak_t) = playbook::manifest_mtimes(&self.paths, &p.server);
+                        let (curr_label, bak_label) = playbook::format_mtime_pair(curr_t, bak_t);
                         preview.push_str("### What will change (current → backup)\n\n");
                         let _ = writeln!(preview, "- Current: {curr_label}");
                         let _ = writeln!(preview, "- Backup:  {bak_label}");
@@ -1637,14 +1676,10 @@ impl LibrarianServer {
 /// short — only the highest-noise triggers — to avoid over-filtering
 /// technical queries.
 const STOP_WORDS: &[&str] = &[
-    "a", "an", "the",
-    "in", "of", "on", "at", "to", "for", "with", "by", "from",
-    "and", "or", "but",
-    "is", "are", "was", "were", "be", "been",
-    "this", "that", "these", "those", "it", "its",
-    "show", "find", "get", "want", "need", "me", "my", "you", "your",
-    "which", "what", "when", "where", "who", "why", "how",
-    "can", "could", "should", "would", "will",
+    "a", "an", "the", "in", "of", "on", "at", "to", "for", "with", "by", "from", "and", "or",
+    "but", "is", "are", "was", "were", "be", "been", "this", "that", "these", "those", "it", "its",
+    "show", "find", "get", "want", "need", "me", "my", "you", "your", "which", "what", "when",
+    "where", "who", "why", "how", "can", "could", "should", "would", "will",
 ];
 
 /// Canonical fingerprint of a seed batch — used to verify that a commit-mode
@@ -1726,7 +1761,10 @@ fn sanitize_for_preview(s: Option<&str>) -> Option<String> {
 /// whitespace, trims, and lowercases. Two claims with the same prose
 /// content but different casing or stray double-spaces compare equal.
 fn normalize_claim(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+    s.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
 }
 
 fn is_meaningful_token(t: &str) -> bool {
@@ -1748,11 +1786,26 @@ fn is_meaningful_phrase_token(t: &str) -> bool {
     }
     !matches!(
         t.to_lowercase().as_str(),
-        "the" | "this" | "that" | "these" | "those"
-            | "and" | "but" | "for" | "with" | "from"
-            | "are" | "was" | "were" | "been"
-            | "has" | "had" | "have"
-            | "you" | "your" | "its"
+        "the"
+            | "this"
+            | "that"
+            | "these"
+            | "those"
+            | "and"
+            | "but"
+            | "for"
+            | "with"
+            | "from"
+            | "are"
+            | "was"
+            | "were"
+            | "been"
+            | "has"
+            | "had"
+            | "have"
+            | "you"
+            | "your"
+            | "its"
     )
 }
 
@@ -1867,13 +1920,7 @@ fn phrase_overlap_bonus(phrases: &[String], query: &str) -> i64 {
     bonus
 }
 
-fn rank(
-    query: &str,
-    query_tokens: &[&str],
-    name: &str,
-    description: &str,
-    aliases: &str,
-) -> i64 {
+fn rank(query: &str, query_tokens: &[&str], name: &str, description: &str, aliases: &str) -> i64 {
     let name_lower = name.to_lowercase();
     let desc_lower = description.to_lowercase();
     let aliases_lower = aliases.to_lowercase();
@@ -1974,9 +2021,7 @@ mod tests {
         // First note: accepted.
         server.note_inner(mk("API key must be set")).unwrap();
         // Same claim normalized (whitespace, case): rejected.
-        let err = server
-            .note_inner(mk("api  key  MUST be set"))
-            .unwrap_err();
+        let err = server.note_inner(mk("api  key  MUST be set")).unwrap_err();
         let msg = format!("{err:#}");
         assert!(
             msg.contains("duplicate note") && msg.contains("allow_duplicate=true"),
@@ -2118,8 +2163,14 @@ gotchas = ["this is lost"]
             msg.contains("misplaced") || msg.contains("silently dropped"),
             "should mention the silent-drop failure mode: {msg}"
         );
-        assert!(msg.contains("[meta]"), "should name the offending parent: {msg}");
-        assert!(msg.contains("manifest_schema"), "should point at the schema topic");
+        assert!(
+            msg.contains("[meta]"),
+            "should name the offending parent: {msg}"
+        );
+        assert!(
+            msg.contains("manifest_schema"),
+            "should point at the schema topic"
+        );
     }
 
     #[test]
@@ -2227,28 +2278,26 @@ summary = "minimal"
         // displays it.
         let bad = ManifestWriteParams {
             server: "demo".into(),
-            manifest_toml: Some(
-                "[meta]\ncategory = \"x\"\n\ngotchas = [\"lost\"]\n".into(),
-            ),
+            manifest_toml: Some("[meta]\ncategory = \"x\"\n\ngotchas = [\"lost\"]\n".into()),
             manifest: None,
             confirm_token: None,
             overwrite: false,
         };
-        let response =
-            tokio::runtime::Runtime::new().unwrap().block_on(async move {
-                server.manifest_write(Parameters(bad)).await
-            });
+        let response = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async move { server.manifest_write(Parameters(bad)).await });
         match response {
             Ok(content) => {
                 assert!(
                     content.starts_with("Error:"),
                     "diagnostic should be prefixed with `Error:`, got: {content}"
                 );
-                assert!(content.contains("misplaced"), "should explain the failure: {content}");
+                assert!(
+                    content.contains("misplaced"),
+                    "should explain the failure: {content}"
+                );
             }
-            Err(e) => panic!(
-                "validation failure must be returned as Ok(content), not Err: {e:?}"
-            ),
+            Err(e) => panic!("validation failure must be returned as Ok(content), not Err: {e:?}"),
         }
     }
 
@@ -2258,14 +2307,8 @@ summary = "minimal"
             sanitize_for_preview(Some("foo — bar")).unwrap(),
             "foo - bar"
         );
-        assert_eq!(
-            sanitize_for_preview(Some("a–b")).unwrap(),
-            "a-b",
-        );
-        assert_eq!(
-            sanitize_for_preview(Some("yes…")).unwrap(),
-            "yes...",
-        );
+        assert_eq!(sanitize_for_preview(Some("a–b")).unwrap(), "a-b",);
+        assert_eq!(sanitize_for_preview(Some("yes…")).unwrap(), "yes...",);
         // Non-breaking space → regular space
         assert_eq!(
             sanitize_for_preview(Some("foo\u{00A0}bar")).unwrap(),
@@ -2277,10 +2320,7 @@ summary = "minimal"
             "foo - bar",
         );
         // Regular Unicode (accents, emoji) is preserved
-        assert_eq!(
-            sanitize_for_preview(Some("café 🎉")).unwrap(),
-            "café 🎉",
-        );
+        assert_eq!(sanitize_for_preview(Some("café 🎉")).unwrap(), "café 🎉",);
         assert_eq!(sanitize_for_preview(None), None);
     }
 
@@ -2298,10 +2338,7 @@ summary = "minimal"
         server
             .seed_inner(SeedParams {
                 server: "claude.ai_Probe".into(),
-                summary: Some(
-                    "Probe MCP via claude.ai mediator — exposes auth tools."
-                        .into(),
-                ),
+                summary: Some("Probe MCP via claude.ai mediator — exposes auth tools.".into()),
                 category: Some("comms".into()),
                 tools: vec![SeedTool {
                     name: "auth".into(),
@@ -2319,7 +2356,10 @@ summary = "minimal"
             })
             .unwrap();
 
-        assert!(!preview.contains('\u{2014}'), "em-dash in preview: {preview}");
+        assert!(
+            !preview.contains('\u{2014}'),
+            "em-dash in preview: {preview}"
+        );
         assert!(!preview.contains('\u{2013}'), "en-dash in preview");
         assert!(
             !preview.contains("<data>") && !preview.contains("<server>"),
@@ -2345,7 +2385,10 @@ summary = "minimal"
             })
             .unwrap();
         assert!(
-            Index::load(&paths.cache_file).unwrap().servers.contains_key("stale_server")
+            Index::load(&paths.cache_file)
+                .unwrap()
+                .servers
+                .contains_key("stale_server")
         );
 
         // Propose
@@ -2368,7 +2411,10 @@ summary = "minimal"
             .unwrap();
         assert!(msg.contains("Removed"));
         assert!(
-            !Index::load(&paths.cache_file).unwrap().servers.contains_key("stale_server")
+            !Index::load(&paths.cache_file)
+                .unwrap()
+                .servers
+                .contains_key("stale_server")
         );
     }
 
@@ -2731,7 +2777,9 @@ summary = "minimal"
 
         // librarian_manifest_diff
         let err = server
-            .manifest_diff_inner(ManifestDiffParams { server: bad.clone() })
+            .manifest_diff_inner(ManifestDiffParams {
+                server: bad.clone(),
+            })
             .unwrap_err();
         let msg = format!("{err:#}");
         assert!(
@@ -2815,7 +2863,10 @@ summary = "minimal"
         let r2 = h2.join().unwrap();
         let oks = [&r1, &r2].iter().filter(|r| r.is_ok()).count();
         let errs = [&r1, &r2].iter().filter(|r| r.is_err()).count();
-        assert_eq!(oks, 1, "exactly one of the concurrent writers should succeed; got r1={r1:?} r2={r2:?}");
+        assert_eq!(
+            oks, 1,
+            "exactly one of the concurrent writers should succeed; got r1={r1:?} r2={r2:?}"
+        );
         assert_eq!(errs, 1, "the other should be rejected with a dedup error");
 
         // Verify only one note actually landed on disk.
@@ -2886,11 +2937,16 @@ summary = "minimal"
         let h2 = run("beta");
         let r1 = h1.join().unwrap();
         let r2 = h2.join().unwrap();
-        assert!(r1.is_ok() && r2.is_ok(), "both writers should commit: r1={r1:?} r2={r2:?}");
+        assert!(
+            r1.is_ok() && r2.is_ok(),
+            "both writers should commit: r1={r1:?} r2={r2:?}"
+        );
 
         // Final manifest content must match exactly one of the writers
         // (no half-written or merged state).
-        let final_m = crate::playbook::load_manifest(&paths, "demo").unwrap().unwrap();
+        let final_m = crate::playbook::load_manifest(&paths, "demo")
+            .unwrap()
+            .unwrap();
         let summary = final_m.meta.summary.unwrap();
         assert!(
             summary == "alpha" || summary == "beta",
@@ -2915,7 +2971,11 @@ summary = "minimal"
             })
             .unwrap();
         let lock_path = crate::lockfile::lock_path_for(&paths);
-        assert!(lock_path.exists(), "lock file should exist at {}", lock_path.display());
+        assert!(
+            lock_path.exists(),
+            "lock file should exist at {}",
+            lock_path.display()
+        );
     }
 
     #[test]

@@ -67,8 +67,7 @@ impl Index {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let bytes = std::fs::read(path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
         let idx: Self = serde_json::from_slice(&bytes)
             .with_context(|| format!("parsing {}", path.display()))?;
         Ok(idx)
@@ -200,8 +199,7 @@ pub fn read_notes(paths: &Paths, server: &str) -> Result<Vec<Note>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let file = std::fs::File::open(&path)
-        .with_context(|| format!("opening {}", path.display()))?;
+    let file = std::fs::File::open(&path).with_context(|| format!("opening {}", path.display()))?;
     let mut out = Vec::new();
     for (idx, line) in BufReader::new(file).lines().enumerate() {
         let line = line.with_context(|| format!("reading {} line {}", path.display(), idx + 1))?;
