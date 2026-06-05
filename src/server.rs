@@ -1665,9 +1665,7 @@ impl LibrarianServer {
         let max_chars = p.max_chars.unwrap_or(fetch::DEFAULT_MAX_CHARS);
         let mut out = String::new();
 
-        let urls: Vec<String> = std::iter::once(p.url.clone())
-            .chain(p.extra_urls)
-            .collect();
+        let urls: Vec<String> = std::iter::once(p.url.clone()).chain(p.extra_urls).collect();
 
         for (i, url) in urls.iter().enumerate() {
             if i > 0 {
