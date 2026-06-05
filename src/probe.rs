@@ -70,8 +70,8 @@ async fn try_probe(
     args: &[String],
     env: &BTreeMap<String, String>,
 ) -> Result<Vec<IndexedTool>> {
-    let resolved = resolve_command(command)
-        .with_context(|| format!("resolving command '{command}'"))?;
+    let resolved =
+        resolve_command(command).with_context(|| format!("resolving command '{command}'"))?;
 
     let mut cmd = Command::new(&resolved);
     cmd.args(args);
@@ -102,10 +102,7 @@ async fn try_probe(
 }
 
 fn convert_tool(t: rmcp::model::Tool) -> IndexedTool {
-    let description = t
-        .description
-        .map(|c| c.to_string())
-        .unwrap_or_default();
+    let description = t.description.map(|c| c.to_string()).unwrap_or_default();
     let arg_summary = summarize_schema(&t.input_schema);
     IndexedTool {
         name: t.name.to_string(),
@@ -150,10 +147,7 @@ fn describe_property(value: &serde_json::Value) -> String {
         Some(o) => o,
         None => return "any".to_string(),
     };
-    let ty = obj
-        .get("type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("any");
+    let ty = obj.get("type").and_then(|v| v.as_str()).unwrap_or("any");
     let desc = obj
         .get("description")
         .and_then(|v| v.as_str())
@@ -178,8 +172,7 @@ fn resolve_command(cmd: &str) -> Result<PathBuf> {
     if p.is_absolute() {
         return Ok(p);
     }
-    let pathext =
-        std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
     let exts: Vec<String> = pathext
         .split(';')
         .map(|s| s.trim().to_string())

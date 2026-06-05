@@ -101,10 +101,10 @@ pub fn load_manifest(paths: &Paths, server: &str) -> Result<Option<Manifest>> {
     if !path.exists() {
         return Ok(None);
     }
-    let bytes = std::fs::read_to_string(&path)
-        .with_context(|| format!("reading {}", path.display()))?;
-    let manifest: Manifest = toml::from_str(&bytes)
-        .with_context(|| format!("parsing {}", path.display()))?;
+    let bytes =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let manifest: Manifest =
+        toml::from_str(&bytes).with_context(|| format!("parsing {}", path.display()))?;
     Ok(Some(manifest))
 }
 
@@ -162,7 +162,10 @@ pub fn manifest_path_for(paths: &Paths, server: &str) -> std::path::PathBuf {
 
 // =================== Rendering: librarian_list ===================
 
-pub fn render_list(entries: &[(ServerEntry, Option<Manifest>)], category_filter: Option<&str>) -> String {
+pub fn render_list(
+    entries: &[(ServerEntry, Option<Manifest>)],
+    category_filter: Option<&str>,
+) -> String {
     let mut buckets: BTreeMap<String, Vec<&(ServerEntry, Option<Manifest>)>> = BTreeMap::new();
     for pair in entries {
         // Precedence: manifest meta wins (authored canon), then the entry's
@@ -235,11 +238,13 @@ fn auto_summary(entry: &ServerEntry) -> Option<String> {
         return None;
     }
     let n = entry.tools.len();
-    let first: Vec<&str> = entry.tools.iter().take(3).map(|t| t.name.as_str()).collect();
-    Some(format!(
-        "{n} tools (e.g. {})",
-        first.join(", ")
-    ))
+    let first: Vec<&str> = entry
+        .tools
+        .iter()
+        .take(3)
+        .map(|t| t.name.as_str())
+        .collect();
+    Some(format!("{n} tools (e.g. {})", first.join(", ")))
 }
 
 // =================== Rendering: librarian_help ===================
@@ -290,8 +295,8 @@ fn render_overview(entry: &ServerEntry, manifest: Option<&Manifest>, notes: &[No
         .iter()
         .filter(|n| n.kind == NoteKind::Workflow && n.basis == NoteBasis::Observed)
         .collect();
-    let has_workflows = manifest.map(|m| !m.workflows.is_empty()).unwrap_or(false)
-        || !workflow_notes.is_empty();
+    let has_workflows =
+        manifest.map(|m| !m.workflows.is_empty()).unwrap_or(false) || !workflow_notes.is_empty();
     if has_workflows {
         out.push_str("## Key Workflows\n\n");
         if let Some(m) = manifest {
@@ -300,7 +305,11 @@ fn render_overview(entry: &ServerEntry, manifest: Option<&Manifest>, notes: &[No
             }
         }
         for note in &workflow_notes {
-            let stale = if note.possibly_stale { " ⚠possibly stale" } else { "" };
+            let stale = if note.possibly_stale {
+                " ⚠possibly stale"
+            } else {
+                ""
+            };
             let _ = writeln!(
                 out,
                 "- *(learned {}{})* {}",
@@ -315,7 +324,9 @@ fn render_overview(entry: &ServerEntry, manifest: Option<&Manifest>, notes: &[No
     // Tool categories: prefer probed tools if we have them; otherwise fall
     // back to manifest-declared categories so manifest-only servers
     // (authored before install) still show their structure.
-    let has_manifest_categories = manifest.map(|m| !m.tool_categories.is_empty()).unwrap_or(false);
+    let has_manifest_categories = manifest
+        .map(|m| !m.tool_categories.is_empty())
+        .unwrap_or(false);
     if !entry.tools.is_empty() {
         out.push_str("## Tool Categories\n\n");
         let groups = group_tools(entry, manifest);
@@ -324,9 +335,7 @@ fn render_overview(entry: &ServerEntry, manifest: Option<&Manifest>, notes: &[No
             let _ = writeln!(out, "- **{cat}**: {}", names.join(", "));
         }
         out.push('\n');
-    } else if has_manifest_categories
-        && let Some(m) = manifest
-    {
+    } else if has_manifest_categories && let Some(m) = manifest {
         out.push_str("## Tool Categories\n\n");
         out.push_str("*(from manifest — not yet probed against an installed server)*\n\n");
         for cat in &m.tool_categories {
@@ -339,8 +348,10 @@ fn render_overview(entry: &ServerEntry, manifest: Option<&Manifest>, notes: &[No
     let gotcha_notes: Vec<&Note> = notes
         .iter()
         .filter(|n| {
-            matches!(n.kind, NoteKind::Behavior | NoteKind::ErrorPattern | NoteKind::Tip)
-                && n.basis == NoteBasis::Observed
+            matches!(
+                n.kind,
+                NoteKind::Behavior | NoteKind::ErrorPattern | NoteKind::Tip
+            ) && n.basis == NoteBasis::Observed
         })
         .collect();
     let has_gotchas =
@@ -366,7 +377,10 @@ fn render_overview(entry: &ServerEntry, manifest: Option<&Manifest>, notes: &[No
     }
 
     // Inferred (speculative) notes — separate, weaker section
-    let inferred: Vec<&Note> = notes.iter().filter(|n| n.basis == NoteBasis::Inferred).collect();
+    let inferred: Vec<&Note> = notes
+        .iter()
+        .filter(|n| n.basis == NoteBasis::Inferred)
+        .collect();
     if !inferred.is_empty() {
         out.push_str("## Inferred (unverified)\n\n");
         for n in &inferred {
@@ -428,8 +442,8 @@ fn render_topic(
     topic: &str,
 ) -> String {
     let mut out = String::new();
-    let manifest_topic = manifest
-        .and_then(|m| m.topics.iter().find(|t| t.name.eq_ignore_ascii_case(topic)));
+    let manifest_topic =
+        manifest.and_then(|m| m.topics.iter().find(|t| t.name.eq_ignore_ascii_case(topic)));
 
     // Virtual topic names map to the manifest's structural sections.
     // User-defined manifest topics with the same name always win.
@@ -462,9 +476,7 @@ fn render_topic(
     } else if let Some(v) = virtual_kind {
         render_virtual_topic(&mut out, entry, manifest, notes, v);
     } else {
-        out.push_str(
-            "> *No manifest topic by that name. Showing related learned notes only.*\n\n",
-        );
+        out.push_str("> *No manifest topic by that name. Showing related learned notes only.*\n\n");
     }
 
     // Related notes for this topic. Filtering is always computed (we use
@@ -473,12 +485,18 @@ fn render_topic(
     // relevant notes — otherwise the same note appears in two sections.
     let related: Vec<&Note> = notes
         .iter()
-        .filter(|n| n.topic.as_deref().is_some_and(|t| t.eq_ignore_ascii_case(topic)))
+        .filter(|n| {
+            n.topic
+                .as_deref()
+                .is_some_and(|t| t.eq_ignore_ascii_case(topic))
+        })
         .collect();
     if !related.is_empty() && virtual_kind.is_none() {
         out.push_str("## Related Notes\n\n");
-        let (observed, inferred): (Vec<&Note>, Vec<&Note>) =
-            related.iter().copied().partition(|n| n.basis == NoteBasis::Observed);
+        let (observed, inferred): (Vec<&Note>, Vec<&Note>) = related
+            .iter()
+            .copied()
+            .partition(|n| n.basis == NoteBasis::Observed);
         for n in observed {
             let stale = if n.possibly_stale { " ⚠" } else { "" };
             let _ = writeln!(
@@ -505,8 +523,11 @@ fn render_topic(
     }
 
     // If the topic name matches a tool category, render the tools
-    let category = manifest
-        .and_then(|m| m.tool_categories.iter().find(|c| c.name.eq_ignore_ascii_case(topic)));
+    let category = manifest.and_then(|m| {
+        m.tool_categories
+            .iter()
+            .find(|c| c.name.eq_ignore_ascii_case(topic))
+    });
     if let Some(cat) = category {
         out.push_str("\n## Tools in this category\n\n");
         for tool_name in &cat.tools {
@@ -516,7 +537,11 @@ fn render_topic(
         }
     } else if manifest_topic.is_none() && related.is_empty() {
         // Last-resort: maybe the topic *is* a tool name. Render its detail.
-        if let Some(tool) = entry.tools.iter().find(|t| t.name.eq_ignore_ascii_case(topic)) {
+        if let Some(tool) = entry
+            .tools
+            .iter()
+            .find(|t| t.name.eq_ignore_ascii_case(topic))
+        {
             out.push_str("\n## Tool detail\n\n");
             render_tool_detail(&mut out, tool);
         }
@@ -633,8 +658,7 @@ fn render_virtual_topic(
                 }
                 out.push('\n');
             }
-            if manifest.map(|m| m.workflows.is_empty()).unwrap_or(true)
-                && workflow_notes.is_empty()
+            if manifest.map(|m| m.workflows.is_empty()).unwrap_or(true) && workflow_notes.is_empty()
             {
                 out.push_str("*(no workflows filed yet)*\n");
             }
@@ -719,10 +743,7 @@ fn group_tools<'a>(
 }
 
 fn prefix_of(name: &str) -> String {
-    let token = name
-        .split(['_', '-'])
-        .next()
-        .unwrap_or(name);
+    let token = name.split(['_', '-']).next().unwrap_or(name);
     if token.is_empty() || token == name {
         "misc".to_string()
     } else {
@@ -768,11 +789,15 @@ pub fn render_self() -> String {
          get smarter as you use it.\n\n",
     );
     s.push_str("## Tool Categories\n\n");
-    s.push_str("- **Read**: librarian_list, librarian_help, librarian_search, librarian_manifest_diff\n");
+    s.push_str(
+        "- **Read**: librarian_list, librarian_help, librarian_search, librarian_manifest_diff\n",
+    );
     s.push_str("- **Write**: librarian_note, librarian_seed_playbook, librarian_seed_batch, librarian_manifest_write, librarian_manifest_restore\n");
     s.push_str("- **Fetch**: librarian_fetch_docs (read public vendor docs to bootstrap hosted-server playbooks)\n");
     s.push_str("- **Maintenance**: librarian_refresh\n");
-    s.push_str("- **Bootstrap**: librarian_onboarding (one-shot prompt for first-install setup)\n\n");
+    s.push_str(
+        "- **Bootstrap**: librarian_onboarding (one-shot prompt for first-install setup)\n\n",
+    );
     s.push_str("## Key Workflows\n\n");
     s.push_str("### First-call orientation\n");
     s.push_str("1. `librarian_list()` — landscape of all servers, grouped by category\n");
@@ -789,15 +814,21 @@ pub fn render_self() -> String {
     s.push_str("### Authoring a manifest (the curated playbook for a server)\n");
     s.push_str("1. Construct the `Manifest` (meta, tool_categories, workflows, topics, gotchas, tool_aliases)\n");
     s.push_str("2. `librarian_manifest_write(server, manifest)` — WITHOUT confirm_token, returns a preview + token\n");
-    s.push_str("3. Show the preview to the user verbatim. Wait for them to type \"I agree\" or \"yes\".\n");
+    s.push_str(
+        "3. Show the preview to the user verbatim. Wait for them to type \"I agree\" or \"yes\".\n",
+    );
     s.push_str("4. Re-call with the same manifest plus `confirm_token=...` to commit\n");
     s.push_str("5. `librarian_manifest_diff(server)` to inspect what changed; `librarian_manifest_restore(server)` to undo\n");
     s.push_str("6. `tool_aliases` attaches intent phrases to specific tools so `librarian_search` surfaces them on natural-language queries whose words don't appear in the tool's name/description. See `librarian_help(\"librarian\", \"manifest_schema\")`.\n\n");
     s.push_str("### Bootstrapping a hosted MCP server from vendor docs\n");
     s.push_str("For cloud/claude.ai-mediated servers the librarian can't probe directly, vendor public docs are higher-signal than the schema dump:\n");
     s.push_str("1. `librarian_fetch_docs(url=\"https://docs.vendor.com/mcp\")` — returns cleaned doc content\n");
-    s.push_str("2. Optionally pass `extra_urls=[...]` to grab additional pages in one rate-limited call\n");
-    s.push_str("3. Read the content, synthesize a `Manifest` (meta, categories, workflows, gotchas)\n");
+    s.push_str(
+        "2. Optionally pass `extra_urls=[...]` to grab additional pages in one rate-limited call\n",
+    );
+    s.push_str(
+        "3. Read the content, synthesize a `Manifest` (meta, categories, workflows, gotchas)\n",
+    );
     s.push_str("4. Run the `librarian_manifest_write` propose → user-approve → commit dance with that manifest\n");
     s.push_str("5. Future sessions see the manifest via `librarian_list` and drill in via `librarian_help(server)`\n\n");
     s.push_str("## Important Gotchas\n\n");
@@ -868,11 +899,15 @@ pub fn render_onboarding() -> String {
     s.push_str("```\nlibrarian_seed_batch(\n");
     s.push_str("    servers=[\n");
     s.push_str("        {\n");
-    s.push_str("            \"server\": \"<exact name as in tool prefixes, e.g. claude.ai_Slack>\",\n");
+    s.push_str(
+        "            \"server\": \"<exact name as in tool prefixes, e.g. claude.ai_Slack>\",\n",
+    );
     s.push_str("            \"summary\": \"<one-sentence description>\",\n");
     s.push_str("            \"category\": \"<bucket — see below>\",\n");
     s.push_str("            \"tools\": [\n");
-    s.push_str("                {\"name\": \"tool_name_1\", \"description\": \"one-line summary\"},\n");
+    s.push_str(
+        "                {\"name\": \"tool_name_1\", \"description\": \"one-line summary\"},\n",
+    );
     s.push_str("                {\"name\": \"tool_name_2\", \"description\": \"...\"}\n");
     s.push_str("            ]\n");
     s.push_str("        },\n");
@@ -1010,7 +1045,9 @@ fn render_manifest_schema_topic() -> String {
     s.push_str("### `[meta]` (table)\n");
     s.push_str("- `category` — string. Bucket name for `librarian_list` grouping (e.g. `\"comms\"`, `\"browser\"`).\n");
     s.push_str("- `summary` — string. One-sentence description shown in `librarian_list`.\n");
-    s.push_str("- `paired_cli` — string, optional. Reserved for future CLI playbook generation.\n\n");
+    s.push_str(
+        "- `paired_cli` — string, optional. Reserved for future CLI playbook generation.\n\n",
+    );
 
     s.push_str("### `[[tool_categories]]` (array of tables — note DOUBLE brackets)\n");
     s.push_str("- `name` — string. Category label shown in the overview.\n");
@@ -1027,8 +1064,10 @@ fn render_manifest_schema_topic() -> String {
 
     s.push_str("### `[[tool_aliases]]` (array of tables)\n");
     s.push_str("- `tool` — string. Name of an existing tool on this server.\n");
-    s.push_str("- `phrases` — array of strings. Intent phrases that `librarian_search` will \
-                 fold into ranking for the named tool.\n\n");
+    s.push_str(
+        "- `phrases` — array of strings. Intent phrases that `librarian_search` will \
+                 fold into ranking for the named tool.\n\n",
+    );
     s.push_str(
         "**When to use it.** When the tool's name and description don't carry the words a \
          user would naturally search by. Example: a `outline` tool whose job is \"find \
@@ -1263,8 +1302,7 @@ pub fn write_manifest(paths: &Paths, server: &str, manifest: &Manifest) -> Resul
     // destination are on the same filesystem (always true here — same dir),
     // so readers see either the fully-old content or the fully-new content,
     // never a partial write.
-    std::fs::write(&tmp, s)
-        .with_context(|| format!("writing temp {}", tmp.display()))?;
+    std::fs::write(&tmp, s).with_context(|| format!("writing temp {}", tmp.display()))?;
     std::fs::rename(&tmp, &target)
         .with_context(|| format!("renaming {} into {}", tmp.display(), target.display()))?;
     Ok(())
@@ -1318,10 +1356,10 @@ pub fn load_manifest_backup(paths: &Paths, server: &str) -> Result<Option<Manife
     if !path.exists() {
         return Ok(None);
     }
-    let bytes = std::fs::read_to_string(&path)
-        .with_context(|| format!("reading {}", path.display()))?;
-    let m: Manifest = toml::from_str(&bytes)
-        .with_context(|| format!("parsing {}", path.display()))?;
+    let bytes =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let m: Manifest =
+        toml::from_str(&bytes).with_context(|| format!("parsing {}", path.display()))?;
     Ok(Some(m))
 }
 
@@ -1353,18 +1391,30 @@ pub fn restore_manifest(paths: &Paths, server: &str) -> Result<()> {
     // hold the librarian write lock so two concurrent restores can't trample
     // each other's backup either.
     let target_tmp = paths.manifest_dir.join(format!("{server}.toml.write-tmp"));
-    let backup_tmp = paths.manifest_dir.join(format!("{server}.toml.bak.write-tmp"));
+    let backup_tmp = paths
+        .manifest_dir
+        .join(format!("{server}.toml.bak.write-tmp"));
 
     std::fs::write(&target_tmp, &backup_content)
         .with_context(|| format!("writing temp {}", target_tmp.display()))?;
-    std::fs::rename(&target_tmp, &target)
-        .with_context(|| format!("renaming {} into {}", target_tmp.display(), target.display()))?;
+    std::fs::rename(&target_tmp, &target).with_context(|| {
+        format!(
+            "renaming {} into {}",
+            target_tmp.display(),
+            target.display()
+        )
+    })?;
 
     if let Some(c) = current_content {
         std::fs::write(&backup_tmp, c)
             .with_context(|| format!("writing temp {}", backup_tmp.display()))?;
-        std::fs::rename(&backup_tmp, &backup)
-            .with_context(|| format!("renaming {} into {}", backup_tmp.display(), backup.display()))?;
+        std::fs::rename(&backup_tmp, &backup).with_context(|| {
+            format!(
+                "renaming {} into {}",
+                backup_tmp.display(),
+                backup.display()
+            )
+        })?;
     }
     Ok(())
 }
@@ -1393,8 +1443,16 @@ pub fn diff_manifests(prev: &Manifest, curr: &Manifest) -> String {
             if old.tools != new.tools {
                 Some(format!(
                     "  - was: {}\n  - now: {}",
-                    if old.tools.is_empty() { "*(empty)*".to_string() } else { old.tools.join(", ") },
-                    if new.tools.is_empty() { "*(empty)*".to_string() } else { new.tools.join(", ") },
+                    if old.tools.is_empty() {
+                        "*(empty)*".to_string()
+                    } else {
+                        old.tools.join(", ")
+                    },
+                    if new.tools.is_empty() {
+                        "*(empty)*".to_string()
+                    } else {
+                        new.tools.join(", ")
+                    },
                 ))
             } else {
                 None
@@ -1492,12 +1550,7 @@ fn diff_meta(prev: &ManifestMeta, curr: &ManifestMeta) -> String {
     out
 }
 
-fn diff_by_key<T, F, G>(
-    prev: &[T],
-    curr: &[T],
-    key: F,
-    changed: G,
-) -> String
+fn diff_by_key<T, F, G>(prev: &[T], curr: &[T], key: F, changed: G) -> String
 where
     F: Fn(&T) -> String,
     G: Fn(&T, &T) -> Option<String>,

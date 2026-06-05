@@ -73,18 +73,24 @@ pub fn discover() -> Result<Vec<ServerConfig>> {
     if let Some(path) = config::override_config_path()
         && path.exists()
     {
-        servers.extend(load_from(&path, |p| ConfigSource::Override(p.to_path_buf()))?);
+        servers.extend(load_from(&path, |p| {
+            ConfigSource::Override(p.to_path_buf())
+        })?);
     }
 
     for path in claude_desktop_candidates() {
         if path.exists() {
-            servers.extend(load_from(&path, |p| ConfigSource::ClaudeDesktop(p.to_path_buf()))?);
+            servers.extend(load_from(&path, |p| {
+                ConfigSource::ClaudeDesktop(p.to_path_buf())
+            })?);
         }
     }
 
     for path in claude_code_candidates() {
         if path.exists() {
-            servers.extend(load_from(&path, |p| ConfigSource::ClaudeCode(p.to_path_buf()))?);
+            servers.extend(load_from(&path, |p| {
+                ConfigSource::ClaudeCode(p.to_path_buf())
+            })?);
         }
     }
 
@@ -106,14 +112,10 @@ pub fn discover() -> Result<Vec<ServerConfig>> {
     Ok(out.into_values().collect())
 }
 
-fn load_from(
-    path: &Path,
-    tag: impl Fn(&Path) -> ConfigSource,
-) -> Result<Vec<ServerConfig>> {
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("reading {}", path.display()))?;
-    let raw: RawClaudeConfig = serde_json::from_slice(&bytes)
-        .with_context(|| format!("parsing {}", path.display()))?;
+fn load_from(path: &Path, tag: impl Fn(&Path) -> ConfigSource) -> Result<Vec<ServerConfig>> {
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let raw: RawClaudeConfig =
+        serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))?;
 
     let mut out = Vec::new();
     for (name, entry) in raw.mcp_servers {
@@ -150,7 +152,11 @@ fn load_from(
 fn claude_desktop_candidates() -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Some(appdata) = std::env::var_os("APPDATA") {
-        out.push(PathBuf::from(appdata).join("Claude").join("claude_desktop_config.json"));
+        out.push(
+            PathBuf::from(appdata)
+                .join("Claude")
+                .join("claude_desktop_config.json"),
+        );
     }
     out
 }

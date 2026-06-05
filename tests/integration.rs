@@ -165,8 +165,14 @@ fn render_list_groups_by_category() {
     a_manifest.meta.summary = Some("Knowledge graph server.".into());
 
     let pairs = vec![
-        (fake_entry("demo-kb", vec![("query_nodes", "find nodes", vec![])]), Some(a_manifest)),
-        (fake_entry("playwright", vec![("browser_click", "click", vec![])]), None),
+        (
+            fake_entry("demo-kb", vec![("query_nodes", "find nodes", vec![])]),
+            Some(a_manifest),
+        ),
+        (
+            fake_entry("playwright", vec![("browser_click", "click", vec![])]),
+            None,
+        ),
     ];
     let out = playbook::render_list(&pairs, None);
     assert!(out.contains("## knowledge"));
@@ -188,7 +194,10 @@ fn render_list_uses_entry_category_when_no_manifest() {
     entry.category = Some("comms".into());
     let pairs = vec![(entry, None)];
     let out = playbook::render_list(&pairs, None);
-    assert!(out.contains("## comms"), "should bucket under comms, got: {out}");
+    assert!(
+        out.contains("## comms"),
+        "should bucket under comms, got: {out}"
+    );
     assert!(!out.contains("## uncategorized"));
 }
 
@@ -316,7 +325,10 @@ fn topic_renders_tools_in_named_category() {
     let out = playbook::render_help(&entry, Some(&manifest), &[], Some("Read"));
     assert!(out.contains("query_nodes"));
     assert!(out.contains("query_edges"));
-    assert!(!out.contains("graph_add_node"), "should not include non-Read tools");
+    assert!(
+        !out.contains("graph_add_node"),
+        "should not include non-Read tools"
+    );
 }
 
 #[test]
@@ -332,20 +344,18 @@ fn librarian_self_help_is_nonempty() {
 #[test]
 fn inferred_notes_render_in_weaker_section() {
     let entry = fake_entry("foo", vec![]);
-    let notes = vec![
-        Note {
-            timestamp: Utc::now(),
-            session_id: None,
-            server: "foo".into(),
-            tool: None,
-            topic: None,
-            kind: NoteKind::Behavior,
-            basis: NoteBasis::Inferred,
-            claim: "probably batches requests".into(),
-            tags: vec![],
-            possibly_stale: false,
-        },
-    ];
+    let notes = vec![Note {
+        timestamp: Utc::now(),
+        session_id: None,
+        server: "foo".into(),
+        tool: None,
+        topic: None,
+        kind: NoteKind::Behavior,
+        basis: NoteBasis::Inferred,
+        claim: "probably batches requests".into(),
+        tags: vec![],
+        possibly_stale: false,
+    }];
     let out = playbook::render_help(&entry, None, &notes, None);
     assert!(out.contains("Inferred (unverified)"));
     assert!(out.contains("probably batches requests"));
@@ -405,7 +415,10 @@ fn index_save_load_round_trip() {
     let mut idx = Index::default();
     idx.servers.insert(
         "demo-kb".to_string(),
-        fake_entry("demo-kb", vec![("query_nodes", "find nodes", vec!["query"])]),
+        fake_entry(
+            "demo-kb",
+            vec![("query_nodes", "find nodes", vec!["query"])],
+        ),
     );
     idx.save(&paths.cache_file).unwrap();
     let loaded = Index::load(&paths.cache_file).unwrap();
@@ -496,41 +509,44 @@ fn malformed_toml_returns_parse_error() {
 #[test]
 fn note_params_rejects_null_kind() {
     let json = r#"{"server":"x","kind":null,"basis":"observed","claim":"y"}"#;
-    let result: Result<mcp_librarian::server::NoteParams, _> =
-        serde_json::from_str(json);
-    assert!(result.is_err(), "null kind should be rejected; got {:?}", result.ok().map(|p| p.kind));
+    let result: Result<mcp_librarian::server::NoteParams, _> = serde_json::from_str(json);
+    assert!(
+        result.is_err(),
+        "null kind should be rejected; got {:?}",
+        result.ok().map(|p| p.kind)
+    );
 }
 
 #[test]
 fn note_params_rejects_missing_kind() {
     let json = r#"{"server":"x","basis":"observed","claim":"y"}"#;
-    let result: Result<mcp_librarian::server::NoteParams, _> =
-        serde_json::from_str(json);
+    let result: Result<mcp_librarian::server::NoteParams, _> = serde_json::from_str(json);
     assert!(result.is_err(), "missing kind should be rejected");
 }
 
 #[test]
 fn note_params_rejects_invalid_kind_variant() {
     let json = r#"{"server":"x","kind":"not_a_real_kind","basis":"observed","claim":"y"}"#;
-    let result: Result<mcp_librarian::server::NoteParams, _> =
-        serde_json::from_str(json);
+    let result: Result<mcp_librarian::server::NoteParams, _> = serde_json::from_str(json);
     assert!(result.is_err(), "unknown kind variant should be rejected");
 }
 
 #[test]
 fn note_params_rejects_null_basis() {
     let json = r#"{"server":"x","kind":"tip","basis":null,"claim":"y"}"#;
-    let result: Result<mcp_librarian::server::NoteParams, _> =
-        serde_json::from_str(json);
+    let result: Result<mcp_librarian::server::NoteParams, _> = serde_json::from_str(json);
     assert!(result.is_err(), "null basis should be rejected");
 }
 
 #[test]
 fn note_params_accepts_valid_input() {
     let json = r#"{"server":"x","kind":"workflow","basis":"observed","claim":"y"}"#;
-    let result: Result<mcp_librarian::server::NoteParams, _> =
-        serde_json::from_str(json);
-    assert!(result.is_ok(), "valid input should parse: {:?}", result.err());
+    let result: Result<mcp_librarian::server::NoteParams, _> = serde_json::from_str(json);
+    assert!(
+        result.is_ok(),
+        "valid input should parse: {:?}",
+        result.err()
+    );
 }
 
 // --- server name validation (path traversal defense) ---
@@ -581,12 +597,27 @@ fn validate_server_name_blocks_empty_and_overlong() {
 #[test]
 fn validate_server_name_blocks_leading_dot_and_control_chars() {
     use mcp_librarian::config::validate_server_name;
-    assert!(validate_server_name(".hidden").is_err(), "leading dot must be rejected");
+    assert!(
+        validate_server_name(".hidden").is_err(),
+        "leading dot must be rejected"
+    );
     assert!(validate_server_name(".").is_err());
-    assert!(validate_server_name("foo\0bar").is_err(), "NUL byte must be rejected");
-    assert!(validate_server_name("foo\nbar").is_err(), "newline must be rejected");
-    assert!(validate_server_name("foo bar").is_err(), "space must be rejected");
-    assert!(validate_server_name("foo:bar").is_err(), "colon must be rejected");
+    assert!(
+        validate_server_name("foo\0bar").is_err(),
+        "NUL byte must be rejected"
+    );
+    assert!(
+        validate_server_name("foo\nbar").is_err(),
+        "newline must be rejected"
+    );
+    assert!(
+        validate_server_name("foo bar").is_err(),
+        "space must be rejected"
+    );
+    assert!(
+        validate_server_name("foo:bar").is_err(),
+        "colon must be rejected"
+    );
 }
 
 // --- search surfaces manifest-only servers (Fix 3) ---
@@ -616,7 +647,13 @@ fn list_manifest_servers_lets_search_find_them() {
 
     // And loading the manifest gives us the searchable content
     let loaded = playbook::load_manifest(&paths, "github").unwrap().unwrap();
-    assert!(loaded.meta.summary.as_deref().is_some_and(|s| s.contains("Repository")));
+    assert!(
+        loaded
+            .meta
+            .summary
+            .as_deref()
+            .is_some_and(|s| s.contains("Repository"))
+    );
     assert!(loaded.workflows.iter().any(|w| w.title.contains("repo")));
 }
 
@@ -678,7 +715,10 @@ fn librarian_manifest_schema_topic_renders() {
     let out = playbook::render_librarian_topic("manifest_schema");
     // Headers and key references
     assert!(out.contains("manifest schema"), "should have title");
-    assert!(out.contains("TOML grammar trap"), "should warn about root-before-section");
+    assert!(
+        out.contains("TOML grammar trap"),
+        "should warn about root-before-section"
+    );
     // All four sections covered
     assert!(out.contains("[meta]"));
     assert!(out.contains("[[tool_categories]]"));
@@ -687,7 +727,10 @@ fn librarian_manifest_schema_topic_renders() {
     assert!(out.contains("gotchas"));
     // Working example present
     assert!(out.contains("Minimal working example"));
-    assert!(out.contains("foo_get"), "example should include concrete tool names");
+    assert!(
+        out.contains("foo_get"),
+        "example should include concrete tool names"
+    );
 }
 
 #[test]
@@ -695,7 +738,10 @@ fn librarian_topic_aliases_resolve() {
     let canonical = playbook::render_librarian_topic("manifest_schema");
     assert_eq!(playbook::render_librarian_topic("manifest"), canonical);
     assert_eq!(playbook::render_librarian_topic("schema"), canonical);
-    assert_eq!(playbook::render_librarian_topic("Manifest-Schema"), canonical);
+    assert_eq!(
+        playbook::render_librarian_topic("Manifest-Schema"),
+        canonical
+    );
 }
 
 #[test]
@@ -729,14 +775,15 @@ fn list_marker_shows_seeded_tool_count() {
 
     let pairs = vec![(empty, None), (single, None), (many, None)];
     let out = playbook::render_list(&pairs, None);
-    assert!(out.contains("(seeded — no tools)"), "should distinguish zero-tool seeds: {out}");
+    assert!(
+        out.contains("(seeded — no tools)"),
+        "should distinguish zero-tool seeds: {out}"
+    );
     assert!(out.contains("(seeded — 1 tool)"));
     assert!(out.contains("(seeded — 4 tools)"));
     // Old uniform "(seeded)" marker should no longer appear
-    let lines_with_bare_seeded: Vec<&str> = out
-        .lines()
-        .filter(|l| l.contains("(seeded)"))
-        .collect();
+    let lines_with_bare_seeded: Vec<&str> =
+        out.lines().filter(|l| l.contains("(seeded)")).collect();
     assert!(
         lines_with_bare_seeded.is_empty(),
         "uniform `(seeded)` marker should be replaced: {lines_with_bare_seeded:?}"
@@ -772,7 +819,10 @@ fn auto_grouping_recurses_when_all_tools_share_prefix() {
 
     // Should have multiple sub-buckets, not one big "notion" bucket
     assert!(out.contains("**create**"), "should produce a create bucket");
-    assert!(out.contains("**update**"), "should produce an update bucket");
+    assert!(
+        out.contains("**update**"),
+        "should produce an update bucket"
+    );
     assert!(out.contains("**get**"), "should produce a get bucket");
     // Not a single "notion" bucket containing everything
     let notion_bucket_line = out.lines().find(|l| l.starts_with("- **notion**:"));
@@ -815,7 +865,10 @@ fn auto_grouping_skips_recursion_when_not_useful() {
     let out = playbook::render_help(&entry, None, &[], None);
     // Should keep the flat foo bucket since every second-token sub-bucket
     // would have only 1 tool.
-    assert!(out.contains("**foo**:"), "should keep flat foo bucket: {out}");
+    assert!(
+        out.contains("**foo**:"),
+        "should keep flat foo bucket: {out}"
+    );
     assert!(!out.contains("**alpha**"));
     assert!(!out.contains("**beta**"));
 }
@@ -842,11 +895,26 @@ fn seeded_help_shows_manifest_authoring_footer() {
     let mut entry = fake_entry("claude.ai_Foo", vec![("foo_x", "do x", vec![])]);
     entry.probe_status = ProbeStatus::Seeded;
     let out = playbook::render_help(&entry, None, &[], None);
-    assert!(out.contains("seeded entry"), "should call out the seed state");
-    assert!(out.contains("librarian_fetch_docs"), "should suggest fetch_docs");
-    assert!(out.contains("manifest_schema"), "should point at schema topic");
-    assert!(out.contains("librarian_manifest_write"), "should reference the write tool");
-    assert!(out.contains("claude.ai_Foo"), "should embed the server name in the example");
+    assert!(
+        out.contains("seeded entry"),
+        "should call out the seed state"
+    );
+    assert!(
+        out.contains("librarian_fetch_docs"),
+        "should suggest fetch_docs"
+    );
+    assert!(
+        out.contains("manifest_schema"),
+        "should point at schema topic"
+    );
+    assert!(
+        out.contains("librarian_manifest_write"),
+        "should reference the write tool"
+    );
+    assert!(
+        out.contains("claude.ai_Foo"),
+        "should embed the server name in the example"
+    );
 }
 
 #[test]
@@ -862,7 +930,10 @@ fn probed_help_does_not_show_seed_footer() {
         ..Default::default()
     };
     let out = playbook::render_help(&entry, Some(&manifest), &[], None);
-    assert!(!out.contains("seeded entry"), "manifest-backed entries should NOT show seed nudge");
+    assert!(
+        !out.contains("seeded entry"),
+        "manifest-backed entries should NOT show seed nudge"
+    );
 }
 
 #[test]
@@ -872,18 +943,36 @@ fn seeded_help_without_tools_skips_footer() {
     let mut entry = fake_entry("empty", vec![]);
     entry.probe_status = ProbeStatus::Seeded;
     let out = playbook::render_help(&entry, None, &[], None);
-    assert!(!out.contains("seeded entry"), "no-tools seeded entry skips the footer");
+    assert!(
+        !out.contains("seeded entry"),
+        "no-tools seeded entry skips the footer"
+    );
 }
 
 #[test]
 fn librarian_onboarding_covers_the_four_steps() {
     let out = playbook::render_onboarding();
-    assert!(out.contains("librarian_refresh"), "step 1 should call refresh");
+    assert!(
+        out.contains("librarian_refresh"),
+        "step 1 should call refresh"
+    );
     assert!(out.contains("librarian_list"), "should reference list");
-    assert!(out.contains("librarian_seed_playbook"), "step 3 should call seed");
-    assert!(out.contains("librarian_manifest_write"), "should mention manifest authoring");
-    assert!(out.contains("deferred-tools"), "should mention where hosted servers come from");
-    assert!(out.contains("claude.ai_"), "should give a concrete naming example");
+    assert!(
+        out.contains("librarian_seed_playbook"),
+        "step 3 should call seed"
+    );
+    assert!(
+        out.contains("librarian_manifest_write"),
+        "should mention manifest authoring"
+    );
+    assert!(
+        out.contains("deferred-tools"),
+        "should mention where hosted servers come from"
+    );
+    assert!(
+        out.contains("claude.ai_"),
+        "should give a concrete naming example"
+    );
 }
 
 #[test]
@@ -958,7 +1047,9 @@ fn manifest_schema_topic_documents_tool_aliases() {
     );
     // The example block at the bottom of the topic should include an
     // alias entry so an agent copy-pasting gets the field shape right.
-    let example_marker = out.find("Minimal working example").expect("example section");
+    let example_marker = out
+        .find("Minimal working example")
+        .expect("example section");
     let example_tail = &out[example_marker..];
     assert!(
         example_tail.contains("tool_aliases"),
@@ -1257,8 +1348,14 @@ fn manifest_fingerprint_stable_for_identical_content() {
         },
         ..Default::default()
     };
-    assert_eq!(playbook::manifest_fingerprint(&m1), playbook::manifest_fingerprint(&m2));
-    assert_ne!(playbook::manifest_fingerprint(&m1), playbook::manifest_fingerprint(&m3));
+    assert_eq!(
+        playbook::manifest_fingerprint(&m1),
+        playbook::manifest_fingerprint(&m2)
+    );
+    assert_ne!(
+        playbook::manifest_fingerprint(&m1),
+        playbook::manifest_fingerprint(&m3)
+    );
 }
 
 #[test]
@@ -1307,7 +1404,9 @@ fn write_manifest_creates_backup_on_overwrite() {
     playbook::write_manifest(&paths, "foo", &v2).unwrap();
     // Second write: backup is the first version
     assert!(paths.manifest_backup_path("foo").exists());
-    let bak = playbook::load_manifest_backup(&paths, "foo").unwrap().unwrap();
+    let bak = playbook::load_manifest_backup(&paths, "foo")
+        .unwrap()
+        .unwrap();
     assert_eq!(bak.meta.summary.as_deref(), Some("first"));
     let curr = playbook::load_manifest(&paths, "foo").unwrap().unwrap();
     assert_eq!(curr.meta.summary.as_deref(), Some("second"));
@@ -1322,8 +1421,14 @@ fn diff_shows_added_changed_removed() {
             paired_cli: None,
         },
         tool_categories: vec![
-            ManifestCategory { name: "A".into(), tools: vec!["a".into()] },
-            ManifestCategory { name: "B".into(), tools: vec!["b".into()] },
+            ManifestCategory {
+                name: "A".into(),
+                tools: vec!["a".into()],
+            },
+            ManifestCategory {
+                name: "B".into(),
+                tools: vec!["b".into()],
+            },
         ],
         workflows: vec![],
         topics: vec![],
@@ -1337,9 +1442,15 @@ fn diff_shows_added_changed_removed() {
             paired_cli: None,
         },
         tool_categories: vec![
-            ManifestCategory { name: "A".into(), tools: vec!["a".into(), "a2".into()] }, // changed
-            ManifestCategory { name: "C".into(), tools: vec!["c".into()] },              // added
-            // B removed
+            ManifestCategory {
+                name: "A".into(),
+                tools: vec!["a".into(), "a2".into()],
+            }, // changed
+            ManifestCategory {
+                name: "C".into(),
+                tools: vec!["c".into()],
+            }, // added
+               // B removed
         ],
         workflows: vec![],
         topics: vec![],
@@ -1374,29 +1485,54 @@ fn restore_is_reversible() {
     playbook::write_manifest(&paths, "foo", &v2).unwrap();
     // current = second, backup = first
     assert_eq!(
-        playbook::load_manifest(&paths, "foo").unwrap().unwrap().meta.summary.as_deref(),
+        playbook::load_manifest(&paths, "foo")
+            .unwrap()
+            .unwrap()
+            .meta
+            .summary
+            .as_deref(),
         Some("second")
     );
 
     // First restore: current ↔ backup
     playbook::restore_manifest(&paths, "foo").unwrap();
     assert_eq!(
-        playbook::load_manifest(&paths, "foo").unwrap().unwrap().meta.summary.as_deref(),
+        playbook::load_manifest(&paths, "foo")
+            .unwrap()
+            .unwrap()
+            .meta
+            .summary
+            .as_deref(),
         Some("first")
     );
     assert_eq!(
-        playbook::load_manifest_backup(&paths, "foo").unwrap().unwrap().meta.summary.as_deref(),
+        playbook::load_manifest_backup(&paths, "foo")
+            .unwrap()
+            .unwrap()
+            .meta
+            .summary
+            .as_deref(),
         Some("second")
     );
 
     // Second restore: should swap back
     playbook::restore_manifest(&paths, "foo").unwrap();
     assert_eq!(
-        playbook::load_manifest(&paths, "foo").unwrap().unwrap().meta.summary.as_deref(),
+        playbook::load_manifest(&paths, "foo")
+            .unwrap()
+            .unwrap()
+            .meta
+            .summary
+            .as_deref(),
         Some("second")
     );
     assert_eq!(
-        playbook::load_manifest_backup(&paths, "foo").unwrap().unwrap().meta.summary.as_deref(),
+        playbook::load_manifest_backup(&paths, "foo")
+            .unwrap()
+            .unwrap()
+            .meta
+            .summary
+            .as_deref(),
         Some("first")
     );
 }
@@ -1439,7 +1575,10 @@ fn entry_manifest_only_marks_status() {
     let e = mcp_librarian::index::entry_manifest_only("github");
     assert_eq!(e.name, "github");
     assert!(!e.probeable);
-    assert_eq!(e.probe_status, mcp_librarian::index::ProbeStatus::ManifestOnly);
+    assert_eq!(
+        e.probe_status,
+        mcp_librarian::index::ProbeStatus::ManifestOnly
+    );
 }
 
 #[test]

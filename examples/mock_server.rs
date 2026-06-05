@@ -40,19 +40,16 @@ struct BetaParams {
 
 #[tool_router]
 impl MockServer {
-    #[tool(name = "alpha_do", description = "Do an alpha thing with given volume.")]
-    async fn alpha_do(
-        &self,
-        Parameters(p): Parameters<AlphaParams>,
-    ) -> Result<String, ErrorData> {
+    #[tool(
+        name = "alpha_do",
+        description = "Do an alpha thing with given volume."
+    )]
+    async fn alpha_do(&self, Parameters(p): Parameters<AlphaParams>) -> Result<String, ErrorData> {
         Ok(format!("alpha {} @ {:?}", p.thing, p.volume))
     }
 
     #[tool(name = "beta_run", description = "Run beta against a list of targets.")]
-    async fn beta_run(
-        &self,
-        Parameters(p): Parameters<BetaParams>,
-    ) -> Result<String, ErrorData> {
+    async fn beta_run(&self, Parameters(p): Parameters<BetaParams>) -> Result<String, ErrorData> {
         Ok(format!("beta over {} targets", p.targets.len()))
     }
 }
@@ -71,9 +68,7 @@ impl ServerHandler for MockServer {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let srv = MockServer::new();
-    let running = srv
-        .serve((tokio::io::stdin(), tokio::io::stdout()))
-        .await?;
+    let running = srv.serve((tokio::io::stdin(), tokio::io::stdout())).await?;
     running.waiting().await?;
     Ok(())
 }
