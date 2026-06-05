@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/dmriding/mcp-librarian/blob/main/SECURITY.md
+    about: Do not file security issues publicly. See SECURITY.md for the disclosure channel.
+  - name: Code of Conduct concern
+    url: https://github.com/dmriding/mcp-librarian/blob/main/CODE_OF_CONDUCT.md
+    about: Report conduct concerns to the maintainer email in CODE_OF_CONDUCT.md, not as a public issue.
