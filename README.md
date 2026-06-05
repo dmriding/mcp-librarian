@@ -150,6 +150,10 @@ cargo install --path .
 
 The result is one self-contained ~12 MB binary. No runtime dependencies, no Node, no Python.
 
+### Tested platforms
+
+Windows 10/11 is the primary development and CI target. Linux/macOS paths via the `directories` crate compile and should work, but are exercised only at release-tag time via the release matrix workflow, not on every push. Reports + PRs welcome.
+
 ## Configure (add to your MCP client)
 
 ### Claude Code (`~/.claude.json` on every platform)
