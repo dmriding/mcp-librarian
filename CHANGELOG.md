@@ -4,21 +4,32 @@ All notable changes to this project will be documented here. Format follows [Kee
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-06-02
+## [0.2.0] - 2026-06-05
 
-Intent-aware search and directive session orientation. Manifests gain a new additive `tool_aliases` field; agents get a session-init nudge to orient before acting; tool failures now arrive as `Ok` content so no client renderer can swallow them.
+First public release. Intent-aware search and directive session orientation; manifests gain an additive `tool_aliases` field; tool failures arrive as `Ok` content so no client renderer can swallow them; hard input caps at every write tool entry; pre-tag audit pass complete (docs, dependency hygiene, threat-model deferrals, concurrency stress tests).
 
 ### Added
 - **`tool_aliases` field on manifests** — manifest authors can attach intent phrases per tool (e.g. `outline` aliased to `["find function", "locate definition", "where is X defined"]`). Phrases are folded into `librarian_search` ranking so agents describing intent in natural language surface the right tool even when it shares no lexical tokens with the query. Backward-compatible (`#[serde(default)]`); existing manifests parse unchanged. Documented in `librarian_help("librarian", "manifest_schema")`.
 - `librarian_manifest_write` propose preview now surfaces a soft nudge when a manifest has zero gotchas: *"no gotchas listed. Real-world usage patterns and footguns are typically the highest-signal part of a playbook. Consider adding 2-3 before committing."* Not a hard reject — some servers legitimately have none.
+- **Hard input caps at tool boundary** to bound parser memory against adversarial agent input: 256 KiB for `manifest_toml`, 8 KiB for `librarian_note` `claim`, 16 for `librarian_fetch_docs` `extra_urls` count. All emit explicit "Error: X bytes exceeds cap of Y. Action: …" responses, well above realistic input sizes.
+- GitHub Actions: per-push Windows `cargo fmt + clippy + test + doc` workflow, plus tag-triggered Linux/macOS/Windows matrix workflow for release-time cross-platform verification. Advisory `cargo audit` job runs alongside.
+- `cargo deny check` configuration ([deny.toml](deny.toml)) — license allow-list, wildcard-version ban, source restrictions.
+- `CODE_OF_CONDUCT.md`, GitHub issue + PR templates, security-disclosure contact link in issue config.
+- `SECURITY.md` now documents the previously-implicit threat-model deferrals: same-nanosecond token collision (by design for a local single-user tool), adversarial filesystem TOCTOU, backup history depth = 1, TOML nesting cap (handled via input size cap), tool-boundary panics (terminate process by design).
+- README "Tested platforms" subsection — Windows primary, Linux/macOS via `directories` crate exercised on tag-time matrix CI.
+- Concurrency stress test: 8 concurrent `librarian_note` writes; asserts every write succeeds, every note lands, no orphaned `.tmp` files.
+- Unicode trap test pinning that `validate_server_name` continues to reject combining marks, ZWJ, BOM, emoji, control bytes.
+- Empty-manifest round-trip test (default `Manifest` → TOML → parse → render with explicit zero-gotcha nudge).
 
 ### Changed
 - Rewrote the rmcp server `instructions` string (surfaced at session init by Claude Desktop / Claude Code / Codex) to open with directive framing: *"Orient before acting. Before calling any indexed MCP server's tools, call `librarian_help(server)`..."*. The prior text was informational and left the orient-first behavior opt-in.
 - `librarian_search` ranking now folds curated **intent phrases** into the score (see Added: `tool_aliases`). Alias hits rank between description and tool-name weight — curated phrases beat auto-descriptions but the tool's own name still wins for direct lookups.
 - `librarian_search` ranking adds a **per-phrase token-overlap bonus** on top of haystack-level alias scoring: when an alias phrase has ≥2 meaningful tokens and ≥50% of them appear in the query, the tool gets a phrase-level bonus so multi-word intent matches outrank tools that only share a single common token via their name.
+- Project-wide `cargo fmt` pass — first time formatting was applied across the codebase. No semantic changes.
 
 ### Fixed
 - Tool failures now return `Ok` MCP content with a leading `Error: …` prefix instead of JSON-RPC `error` envelopes. Claude Desktop swallows JSON-RPC errors on some renderer paths, hiding the actionable diagnostic; returning failures as normal tool output makes them visible to the agent and the user. Supersedes the `invalid_params` approach shipped in 0.1.0 for the user-facing cases.
+- `playbook::manifest_fingerprint` no longer silently collapses to an empty string on serialization failure (`unwrap_or_default` → `expect("manifest serialization is infallible")`). Empty fingerprints would mean two distinct manifests collide and the propose/commit gate could wave a content-drifted commit through.
 - Typo in `librarian_help("librarian")` workflow text — `tools_dump` → `tools` (matches the actual `librarian_seed_playbook` parameter name).
 
 ## [0.1.0] - 2026-05-16

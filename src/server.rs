@@ -3682,14 +3682,14 @@ summary = "minimal"
         // ("just allow basic Latin-1!") — the test fires immediately when
         // the regex is widened.
         let traps = [
-            "caf\u{00E9}",         // é (precomposed)
-            "cafe\u{0301}",        // é (decomposed: e + combining acute)
-            "demo\u{200D}name",    // zero-width joiner
-            "demo\u{FEFF}name",    // byte-order mark
-            "\u{0301}leading",     // combining mark at start
-            "demo\u{0008}",        // backspace
-            "demo\u{0000}",        // null byte
-            "\u{1F600}",           // emoji
+            "caf\u{00E9}",      // é (precomposed)
+            "cafe\u{0301}",     // é (decomposed: e + combining acute)
+            "demo\u{200D}name", // zero-width joiner
+            "demo\u{FEFF}name", // byte-order mark
+            "\u{0301}leading",  // combining mark at start
+            "demo\u{0008}",     // backspace
+            "demo\u{0000}",     // null byte
+            "\u{1F600}",        // emoji
         ];
         for input in traps {
             let res = validate_server_name(input);
@@ -3707,8 +3707,7 @@ summary = "minimal"
         // at least one tool category / workflow / topic / etc.
         let original = Manifest::default();
         let toml_str = toml::to_string(&original).expect("empty manifest serializes");
-        let parsed: Manifest =
-            toml::from_str(&toml_str).expect("empty manifest TOML parses back");
+        let parsed: Manifest = toml::from_str(&toml_str).expect("empty manifest TOML parses back");
         // Default round-trip equality: every section count must be zero.
         assert_eq!(parsed.workflows.len(), 0);
         assert_eq!(parsed.topics.len(), 0);
