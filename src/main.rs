@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use mcp_librarian::{config, discovery, index, playbook, probe, server};
+use mcp_librarian::{config, discovery, index, lockfile, playbook, probe, server};
 use rmcp::ServiceExt;
 use tracing_subscriber::{EnvFilter, fmt};
 
@@ -126,8 +126,6 @@ fn run_list(paths: config::Paths, category: Option<String>) -> Result<()> {
 
 async fn run_refresh(paths: config::Paths, server: Option<String>) -> Result<()> {
     let configs = discovery::discover()?;
-    let mut idx = index::Index::load(&paths.cache_file)?;
-    let prior = idx.clone();
 
     let to_probe: Vec<_> = match &server {
         Some(name) => configs.into_iter().filter(|c| &c.name == name).collect(),
@@ -142,6 +140,11 @@ async fn run_refresh(paths: config::Paths, server: Option<String>) -> Result<()>
         return Ok(());
     }
 
+    // Probing spawns child processes and can take seconds per server. Done
+    // OUTSIDE the lock so we don't block concurrent MCP-side writes for the
+    // duration of the probe sweep. The merge + save step below takes the
+    // same lock the MCP refresh path uses; without it a CLI `refresh` racing
+    // an MCP write would clobber state.
     let entries = probe::probe_all(&to_probe).await;
     let mut probed = 0usize;
     let mut failed = 0usize;
@@ -153,42 +156,52 @@ async fn run_refresh(paths: config::Paths, server: Option<String>) -> Result<()>
             _ => failed += 1,
         }
     }
-    for entry in entries {
-        // Drift-flag relevant notes
-        if let Some(old) = prior.servers.get(&entry.name) {
-            let mut drifted_tools = Vec::new();
-            for new_tool in &entry.tools {
-                if let Some(old_tool) = old.tools.iter().find(|t| t.name == new_tool.name)
-                    && index::Index::arg_shape_drifted(&old_tool.arg_summary, &new_tool.arg_summary)
-                {
-                    drifted_tools.push(new_tool.name.clone());
-                }
-            }
-            if !drifted_tools.is_empty() {
-                let mut notes = index::read_notes(&paths, &entry.name)?;
-                let mut changed = 0usize;
-                for note in notes.iter_mut() {
-                    if let Some(t) = &note.tool
-                        && drifted_tools.contains(t)
-                        && !note.possibly_stale
+
+    lockfile::with_write_lock(&paths, || {
+        let mut idx = index::Index::load(&paths.cache_file)?;
+        let prior = idx.clone();
+        for entry in entries {
+            // Drift-flag relevant notes against the pre-write index snapshot.
+            if let Some(old) = prior.servers.get(&entry.name) {
+                let mut drifted_tools = Vec::new();
+                for new_tool in &entry.tools {
+                    if let Some(old_tool) = old.tools.iter().find(|t| t.name == new_tool.name)
+                        && index::Index::arg_shape_drifted(
+                            &old_tool.arg_summary,
+                            &new_tool.arg_summary,
+                        )
                     {
-                        note.possibly_stale = true;
-                        changed += 1;
+                        drifted_tools.push(new_tool.name.clone());
                     }
                 }
-                if changed > 0 {
-                    index::write_notes(&paths, &entry.name, &notes)?;
-                    tracing::info!(
-                        server = %entry.name,
-                        flagged = changed,
-                        "drift flags applied"
-                    );
+                if !drifted_tools.is_empty() {
+                    let mut notes = index::read_notes(&paths, &entry.name)?;
+                    let mut changed = 0usize;
+                    for note in notes.iter_mut() {
+                        if let Some(t) = &note.tool
+                            && drifted_tools.contains(t)
+                            && !note.possibly_stale
+                        {
+                            note.possibly_stale = true;
+                            changed += 1;
+                        }
+                    }
+                    if changed > 0 {
+                        index::write_notes(&paths, &entry.name, &notes)?;
+                        tracing::info!(
+                            server = %entry.name,
+                            flagged = changed,
+                            "drift flags applied"
+                        );
+                    }
                 }
             }
+            idx.servers.insert(entry.name.clone(), entry);
         }
-        idx.servers.insert(entry.name.clone(), entry);
-    }
-    idx.save(&paths.cache_file)?;
+        idx.save(&paths.cache_file)?;
+        Ok(())
+    })?;
+
     println!("refreshed: {probed} probed, {failed} failed, {remote} remote (not probed)");
     Ok(())
 }

@@ -289,25 +289,48 @@ fn check_url_cap(state: &FetchState, url: &str) -> Result<()> {
     Ok(())
 }
 
-fn check_rate_limit(state: &FetchState, domain: &str) -> Result<()> {
-    let now = Instant::now();
-    let mut map = state
-        .last_fetch_by_domain
-        .lock()
-        .expect("last_fetch_by_domain poisoned");
-    if let Some(last) = map.get(domain) {
-        let elapsed = now.saturating_duration_since(*last);
+/// Hard upper bound on how long a single `librarian_fetch_docs` call will
+/// wait for the per-domain rate limit before giving up. Each in-call URL
+/// claims the next 1-second slot, so 16 same-domain URLs (the `extra_urls`
+/// cap) queue up at most ~16 seconds; 30 seconds is the safety margin.
+const MAX_RATE_LIMIT_WAIT_SECS: u64 = 30;
+
+/// Wait until this caller's reserved slot in the per-domain rate-limit queue
+/// arrives, then return Ok. The slot is reserved synchronously under the lock
+/// BEFORE the sleep, so concurrent callers see the updated `last` and queue
+/// behind us — no thundering-herd at the moment the slot opens.
+///
+/// This replaces the older bail-on-recent-fetch behavior so `extra_urls`
+/// batches against a single vendor domain (the common case the README
+/// recommends) work without surfacing "rate-limited, retry" errors. The
+/// hard cap above prevents runaway waits if the queue gets pathological.
+async fn wait_for_rate_limit(state: &FetchState, domain: &str) -> Result<()> {
+    let wait = {
+        let mut map = state
+            .last_fetch_by_domain
+            .lock()
+            .expect("last_fetch_by_domain poisoned");
+        let now = Instant::now();
         let min = Duration::from_millis(PER_DOMAIN_MIN_INTERVAL_MS);
-        if elapsed < min {
-            let wait = (min - elapsed).as_millis();
-            bail!(
-                "Error: rate-limited on domain `{domain}` — wait {wait}ms before fetching again. \
-                 Action: server-side polite-citizen guard caps each domain at 1 request per second. \
-                 If you have several URLs from `{domain}`, space them with a 1s delay between calls."
-            );
-        }
+        let target = match map.get(domain) {
+            Some(last) if *last + min > now => *last + min,
+            _ => now,
+        };
+        map.insert(domain.to_string(), target);
+        target.saturating_duration_since(now)
+    };
+    if wait > Duration::from_secs(MAX_RATE_LIMIT_WAIT_SECS) {
+        bail!(
+            "Error: rate-limit queue for domain `{domain}` would force a wait of {}s, \
+             over the {MAX_RATE_LIMIT_WAIT_SECS}s cap. \
+             Action: fetch fewer URLs from this domain in a single call, or split into \
+             multiple calls. The polite-citizen cap is 1 request per second per domain.",
+            wait.as_secs(),
+        );
     }
-    map.insert(domain.to_string(), now);
+    if !wait.is_zero() {
+        tokio::time::sleep(wait).await;
+    }
     Ok(())
 }
 
@@ -389,7 +412,7 @@ pub async fn fetch_docs(
     // 2. New URL — count it against the session cap, then check domain rate.
     check_url_cap(state, url)?;
     let domain = domain_of(url)?;
-    check_rate_limit(state, &domain)?;
+    wait_for_rate_limit(state, &domain).await?;
 
     // 3. DNS-level SSRF check now that we're about to actually fetch. Done
     //    AFTER the cache check so private URLs that came in earlier and are
@@ -634,20 +657,41 @@ mod tests {
         check_url_cap(&state, "https://x.com/0").unwrap();
     }
 
-    #[test]
-    fn rate_limit_blocks_within_window() {
+    #[tokio::test]
+    async fn rate_limit_queues_same_domain_within_window() {
+        // The new behavior: two same-domain calls succeed; the second waits
+        // for its reserved slot rather than erroring. We bound the assertion
+        // by checking that the second call took at least ~half the min
+        // interval (giving wide tolerance for CI jitter) and at most the
+        // hard wait cap. This is the contract `extra_urls` relies on.
         let state = FetchState::default();
-        check_rate_limit(&state, "x.com").unwrap();
-        let err = check_rate_limit(&state, "x.com").unwrap_err();
-        assert!(format!("{err:#}").contains("rate-limited"));
+        wait_for_rate_limit(&state, "x.com").await.unwrap();
+        let start = Instant::now();
+        wait_for_rate_limit(&state, "x.com").await.unwrap();
+        let elapsed = start.elapsed();
+        let min_expected = Duration::from_millis(PER_DOMAIN_MIN_INTERVAL_MS / 2);
+        assert!(
+            elapsed >= min_expected,
+            "second call should have waited at least {min_expected:?}, took {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(MAX_RATE_LIMIT_WAIT_SECS),
+            "second call exceeded the hard wait cap: {elapsed:?}"
+        );
     }
 
-    #[test]
-    fn rate_limit_isolated_per_domain() {
+    #[tokio::test]
+    async fn rate_limit_isolated_per_domain() {
         let state = FetchState::default();
-        check_rate_limit(&state, "a.com").unwrap();
-        // Different domain — should not be blocked.
-        check_rate_limit(&state, "b.com").unwrap();
+        wait_for_rate_limit(&state, "a.com").await.unwrap();
+        // Different domain — should not have to wait.
+        let start = Instant::now();
+        wait_for_rate_limit(&state, "b.com").await.unwrap();
+        assert!(
+            start.elapsed() < Duration::from_millis(100),
+            "different domains must not block each other; took {:?}",
+            start.elapsed()
+        );
     }
 
     #[test]
