@@ -20,7 +20,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
@@ -45,7 +45,7 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: dtolnay/rust-toolchain@1.100.0
       - run: cargo install cargo-audit --locked --quiet
       # RUSTSEC-2024-0436: paste unmaintained (via rmcp). RUSTSEC-2026-0189:
       # rmcp Streamable-HTTP DNS rebinding — not reachable; we serve stdio only.
@@ -58,6 +58,6 @@ jobs:
     # policy violation we want surfaced as a hard stop, not an advisory.
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: dtolnay/rust-toolchain@1.100.0
       - run: cargo install cargo-deny --locked --quiet
       - run: cargo deny check
