@@ -61,7 +61,7 @@ reqwest = { version = "0.12", default-features = false, features = [
     "stream",
 ] }
 html2text = "0.12"
-fs4 = "0.13"
+fs4 = "1.1"
 
 [dev-dependencies]
 tempfile = "3"
