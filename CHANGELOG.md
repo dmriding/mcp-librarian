@@ -4,6 +4,8 @@ All notable changes to this project will be documented here. Format follows [Kee
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-06-29
+
 Pre-public hardening pass. A full adversarial review surfaced two reachable SSRF gaps, a single-call denial-of-service, an ungated destructive write, and a red dependency gate; all are closed below, plus the should-fix and documentation-accuracy items found alongside them.
 
 ### Security
