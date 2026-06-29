@@ -19,7 +19,7 @@ jobs:
     name: test (windows)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.96.0
         with:
           components: clippy, rustfmt
@@ -44,7 +44,7 @@ jobs:
     # which the blocking `deny` job below enforces.
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.96.0
       - run: cargo install cargo-audit --locked --quiet
       # RUSTSEC-2024-0436: paste unmaintained (via rmcp). RUSTSEC-2026-0189:
@@ -57,7 +57,7 @@ jobs:
     # Blocking: deny.toml is under our control, so any failure here is a
     # policy violation we want surfaced as a hard stop, not an advisory.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.96.0
       - run: cargo install cargo-deny --locked --quiet
       - run: cargo deny check
