@@ -154,7 +154,7 @@ The result is one self-contained ~12 MB binary. No runtime dependencies, no Node
 
 ### Tested platforms
 
-Windows 10/11 is the primary development and CI target. Linux/macOS paths via the `directories` crate compile and should work, but are exercised only at release-tag time via the release matrix workflow, not on every push. Reports + PRs welcome.
+Windows 10/11 is the primary development and CI target. **macOS (Apple Silicon) is confirmed working** by the maintainer. Linux paths via the `directories` crate compile and are exercised at release-tag time via the release matrix workflow, but aren't hands-on verified. Reports + PRs welcome.
 
 ## Configure (add to your MCP client)
 
@@ -383,7 +383,7 @@ Resolved via the [`directories`](https://docs.rs/directories) crate. On Windows:
 - Lock: `%APPDATA%\netviper\mcp-librarian\config\.librarian.lock`
 - Learned notes: `%APPDATA%\netviper\mcp-librarian\data\learned\<server>.jsonl`
 
-macOS/Linux paths follow the same crate's conventions. They compile and the release matrix workflow exercises them on every tag, but I'm on Windows day-to-day — corner cases on those platforms are best caught by reports + PRs.
+macOS/Linux paths follow the same crate's conventions. macOS (Apple Silicon) is confirmed working; Linux compiles and the release matrix workflow exercises it on every tag, but I'm on Windows day-to-day — Linux corner cases are best caught by reports + PRs.
 
 ## Environment & CLI
 
@@ -440,7 +440,7 @@ Response bodies are capped at 5 MiB to prevent OOM.
 
 ## Known limitations
 
-- **Windows-first.** macOS/Linux paths exist but I haven't verified them. Patches welcome.
+- **Windows-first, macOS-confirmed.** Windows is the daily-driver target; macOS (Apple Silicon) is confirmed working. Linux paths exist and pass CI but aren't hands-on verified. Patches welcome.
 - **Local stdio probing only.** Remote/cloud MCP servers (the `claude.ai_*` family) can't be probed by spawning. Use `librarian_seed_playbook` or `librarian_fetch_docs` + `librarian_manifest_write` to bootstrap them from the tool list the agent already sees or from vendor docs.
 - **No CLI playbook recursion.** Paired-CLI detection is manifest-driven; the recursive `--help` walker is a future feature.
 - **No compaction of learned notes.** Files grow append-only. `mcp-librarian compact <server>` is a stub. Dedup-at-write-time substantially limits growth in practice.

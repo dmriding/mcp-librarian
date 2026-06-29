@@ -24,6 +24,7 @@ Pre-public hardening pass. A full adversarial review surfaced two reachable SSRF
 - CI: least-privilege `permissions: contents: read` on both workflows; the advisory `cargo audit` job ignores the two accepted advisories explicitly; added `.github/dependabot.yml` to keep Actions + Cargo dependencies current and surface new advisories off-PR.
 - `compact` CLI subcommand prints a clean "not implemented yet" notice instead of a `TODO:` line.
 - Test fixtures use neutral example server names.
+- Platform support docs updated: **macOS (Apple Silicon) is now confirmed working** by the maintainer (previously "compiles, exercised only at release-tag CI"). Windows remains the primary target; Linux stays CI-only / not hands-on verified.
 
 ## [0.2.1] - 2026-06-05
 
