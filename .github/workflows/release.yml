@@ -7,6 +7,11 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Least privilege: this workflow only builds and tests on tag push. It does not
+# publish or create releases, so read-only repo access is all it needs.
+permissions:
+  contents: read
+
 jobs:
   matrix:
     name: test (${{ matrix.os }})

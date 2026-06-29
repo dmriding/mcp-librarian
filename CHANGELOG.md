@@ -4,6 +4,27 @@ All notable changes to this project will be documented here. Format follows [Kee
 
 ## [Unreleased]
 
+Pre-public hardening pass. A full adversarial review surfaced two reachable SSRF gaps, a single-call denial-of-service, an ungated destructive write, and a red dependency gate; all are closed below, plus the should-fix and documentation-accuracy items found alongside them.
+
+### Security
+- **SSRF: connection-time IP validation on every hop.** Outbound `librarian_fetch_docs` now uses a custom `reqwest` DNS resolver that re-runs the block-list against every IP the client actually connects to — the initial host and each redirect hop — and the client dials exactly those IPs. This closes two gaps: (1) a redirect to a hostname that *resolves* into a private/loopback/metadata range (previously only literal-IP redirects were screened), and (2) the DNS-rebinding window where the one-shot resolve check and the real connection could see different IPs. The previous "we don't defend against DNS rebinding" deferral in `SECURITY.md` is removed — it's defended now.
+- **SSRF: IPv6 embedded-IPv4 forms blocked.** The IP block-list now also rejects NAT64 (`64:ff9b::/96`), 6to4 (`2002::/16`), and deprecated IPv4-compatible (`::a.b.c.d`) addresses by decoding and re-checking the embedded IPv4, in addition to the existing IPv4-mapped handling.
+- **DoS: deeply-nested `manifest_toml` is rejected before parsing.** The `toml` crate is recursive-descent with no depth limit; a ~260-byte payload of nested brackets could overflow the thread stack — an unrecoverable abort (not a catchable panic) that killed the whole process, and which the 256 KiB byte cap did not prevent. `librarian_manifest_write` now scans bracket/brace nesting (ignoring strings and comments) and rejects past 32 levels before any parse.
+- **`librarian_seed_playbook` overwrites are now gated.** Adding a *new* entry is still a one-shot fast path, but *overwriting* an existing entry (`overwrite=true`) now goes through the same propose/commit flow as the other write tools: a preview + single-use, content-fingerprinted token, with a commit that rejects on any content drift. Previously `overwrite=true` replaced an entry in a single ungated call — a prompt-injected agent could silently clobber a real probed/curated entry.
+- **Config-derived server names are path-validated.** Server names read from the MCP client config (`mcpServers` keys) now pass the same `validate_server_name` check as agent-supplied names before becoming filesystem paths; invalid keys are skipped with a warning rather than escaping the data dir.
+- **Seed size caps.** Per-server tool count, name/description/summary sizes, and servers-per-batch are bounded, plus a hard ceiling on the serialized `index.json` at save time — `index.json` is re-parsed on nearly every call, so this stops an agent from bloating it.
+- **Token generation no longer collides or reads as a guessable clock.** `generate_token()` was a bare wall-clock nanosecond; two proposes in the same tick could collide and silently evict the earlier pending write. It now appends a process-lifetime monotonic counter (guaranteeing uniqueness) and mixes in an OS-CSPRNG-seeded salt.
+
+### Fixed
+- Dependency advisories cleared so the blocking `cargo deny` CI gate is green: `anyhow` bumped to ≥1.0.103 (RUSTSEC-2026-0190), and RUSTSEC-2026-0189 (rmcp Streamable-HTTP DNS rebinding) is documented as not-reachable in `deny.toml`/CI — the librarian serves over stdio only and never enables the HTTP server transport.
+- `SECURITY.md` and `README.md` corrected to match the implementation: which writes are content-fingerprinted vs server+action-bound; the credential note now states the `env` block is read only to forward it to the spawned child (never stored/logged/returned); learned notes live under `%APPDATA%` (Roaming), not `%LOCALAPPDATA%`, and the on-disk tree shows the cache correctly under `%LOCALAPPDATA%`; the atomic-write claim is scoped to the paths that actually use temp-then-rename.
+- Security-disclosure channel fixed: `SECURITY.md` now points at GitHub private vulnerability reporting and a concrete email rather than a profile address that wasn't published.
+
+### Changed
+- CI: least-privilege `permissions: contents: read` on both workflows; the advisory `cargo audit` job ignores the two accepted advisories explicitly; added `.github/dependabot.yml` to keep Actions + Cargo dependencies current and surface new advisories off-PR.
+- `compact` CLI subcommand prints a clean "not implemented yet" notice instead of a `TODO:` line.
+- Test fixtures use neutral example server names.
+
 ## [0.2.1] - 2026-06-05
 
 Hardening pass: closes the one ungated overwrite path on the librarian surface, routes CLI refresh through the same write-lock as the MCP handler, and turns `extra_urls` rate-limit failures into waits so multi-page same-domain fetches work as documented.

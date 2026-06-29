@@ -119,6 +119,16 @@ fn load_from(path: &Path, tag: impl Fn(&Path) -> ConfigSource) -> Result<Vec<Ser
 
     let mut out = Vec::new();
     for (name, entry) in raw.mcp_servers {
+        // Server names from the client config become filesystem paths
+        // (`<dir>/<name>.toml`, `<dir>/<name>.jsonl`) just like agent-supplied
+        // names do. Apply the same path-traversal validator here so a config
+        // key like `..\\..\\evil` can't escape the data dir on any later
+        // list/help/manifest operation. Invalid entries are skipped, not fatal,
+        // so one bad key doesn't take down discovery of every other server.
+        if let Err(e) = config::validate_server_name(&name) {
+            tracing::warn!("skipping MCP server with unsafe name {name:?}: {e:#}");
+            continue;
+        }
         let server = match entry {
             RawServerEntry::Stdio { command, args, env } => ServerConfig {
                 name,

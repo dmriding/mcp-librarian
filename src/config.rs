@@ -95,7 +95,7 @@ pub fn validate_server_name(name: &str) -> Result<()> {
     if name.is_empty() {
         anyhow::bail!(
             "Error: `server` is empty. Action: pass the name as it appears in your MCP config \
-             (e.g. \"slack\", \"forge\")."
+             (e.g. \"slack\", \"github\")."
         );
     }
     if name.len() > MAX_SERVER_NAME_LEN {

@@ -13,6 +13,15 @@ ignore = [
     # Will clear when rmcp bumps to a version that drops paste, expected
     # in the rmcp 0.9+ cycle.
     "RUSTSEC-2024-0436",
+    # RUSTSEC-2026-0189: DNS-rebinding in rmcp's Streamable-HTTP *server*
+    # transport (missing Host-header validation). NOT REACHABLE here: the
+    # librarian only ever serves over stdio (`serve((stdin, stdout))` in
+    # src/main.rs) and spawns probed servers over the child-process
+    # transport — the advisory text itself states "Non-HTTP transports such
+    # as stdio and child-process transports are not affected." We do not
+    # enable the `transport-streamable-http`/SSE server features and never
+    # bind a TCP listener. Clear this when we bump to rmcp >= 1.4.0.
+    "RUSTSEC-2026-0189",
 ]
 
 [licenses]

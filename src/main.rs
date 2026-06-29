@@ -64,7 +64,11 @@ async fn main() -> Result<()> {
         Command::List { category } => run_list(paths, category),
         Command::Refresh { server } => run_refresh(paths, server).await,
         Command::Compact { server } => {
-            println!("TODO: compaction of learned notes for '{server}' not implemented yet.");
+            println!(
+                "`compact` is not implemented yet — learned notes for '{server}' were left \
+                 untouched. Dedup-at-write-time already limits notes growth; tracked for a \
+                 future release."
+            );
             Ok(())
         }
     }

@@ -557,7 +557,7 @@ fn validate_server_name_accepts_realistic_names() {
     for name in [
         "slack",
         "claude.ai_Slack",
-        "forge",
+        "github",
         "mcp-librarian",
         "context7",
         "a",
@@ -834,19 +834,19 @@ fn auto_grouping_recurses_when_all_tools_share_prefix() {
 
 #[test]
 fn auto_grouping_does_not_recurse_when_already_multiple_groups() {
-    // forge_*, mantis_*, etc. — multiple top-level prefixes, no recursion needed.
+    // acme_*, widgets_*, etc. — multiple top-level prefixes, no recursion needed.
     let entry = fake_entry(
         "mixed",
         vec![
-            ("forge_sprint_start", "", vec![]),
-            ("forge_sprint_status", "", vec![]),
-            ("mantis_find_market", "", vec![]),
-            ("mantis_log_intel", "", vec![]),
+            ("acme_sprint_start", "", vec![]),
+            ("acme_sprint_status", "", vec![]),
+            ("widgets_find_market", "", vec![]),
+            ("widgets_log_intel", "", vec![]),
         ],
     );
     let out = playbook::render_help(&entry, None, &[], None);
-    assert!(out.contains("**forge**"), "forge bucket should exist");
-    assert!(out.contains("**mantis**"), "mantis bucket should exist");
+    assert!(out.contains("**acme**"), "acme bucket should exist");
+    assert!(out.contains("**widgets**"), "widgets bucket should exist");
 }
 
 #[test]

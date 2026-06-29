@@ -17,7 +17,7 @@ Use the shortest caret range that pins what you need — `"0.8"` rather than `"0
 ## Quick dev loop
 
 ```powershell
-cargo test --all-targets                     # 69 unit + 72 integration
+cargo test --all-targets                     # full unit + integration suite
 cargo clippy --all-targets -- -D warnings    # zero-warnings policy
 cargo fmt --all -- --check                   # formatting clean
 cargo build --release                        # binary at target/release/mcp-librarian.exe

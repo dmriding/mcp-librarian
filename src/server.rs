@@ -30,9 +30,18 @@ const PENDING_WRITE_TTL_SECS: i64 = 5 * 60;
 /// hosted servers (Notion's 14 tools etc.) land well under 16 KiB authored.
 /// 256 KiB is ~16x the worst real case, large enough that no honest workflow
 /// hits it, small enough that an adversarial agent cannot exhaust parser
-/// memory via a deeply-nested or pathological TOML payload. Enforced at the
+/// memory via a pathological TOML payload. Enforced at the
 /// `librarian_manifest_write` tool entry before `toml::from_str` runs.
 const MAX_MANIFEST_TOML_BYTES: usize = 256 * 1024;
+
+/// Maximum bracket/brace nesting depth allowed in a `manifest_toml` payload.
+/// Real manifests nest only 2-3 levels (an array-of-tables holding an inline
+/// array, etc.). The `toml` parser is recursive-descent with no built-in depth
+/// limit, so a payload like `x=[[[[…]]]]` at ~130 levels overflows the thread
+/// stack — an unrecoverable abort (NOT a catchable panic) that kills the whole
+/// process. The byte cap does not help: ~130 nested brackets is only ~260
+/// bytes. We reject over-deep input BEFORE handing it to `toml::from_str`.
+const MAX_TOML_NESTING_DEPTH: usize = 32;
 
 /// Hard cap on `librarian_note` `claim` bytes. Notes are convention-prose,
 /// roughly one sentence. 8 KiB is generous; anything bigger is the agent
@@ -44,6 +53,18 @@ const MAX_CLAIM_BYTES: usize = 8 * 1024;
 /// a network round trip and up to `MAX_RESPONSE_BYTES`; capping the count
 /// bounds the per-call wall time and memory footprint.
 const MAX_EXTRA_URLS: usize = 16;
+
+/// Caps on a single seeded server's payload. `index.json` is re-read and
+/// re-parsed on essentially every tool call, so an unbounded seed is a
+/// persistent (restart-surviving) memory/parse-cost amplifier. These bounds
+/// are far above any real MCP server (the busiest hosted servers expose tens
+/// of tools with short descriptions) yet stop an agent from bloating the index.
+const MAX_SEED_TOOLS_PER_SERVER: usize = 512;
+const MAX_SEED_TOOL_NAME_BYTES: usize = 256;
+const MAX_SEED_TEXT_BYTES: usize = 8 * 1024; // per description / summary / hint
+/// Cap on servers per `librarian_seed_batch` call (each may carry up to
+/// `MAX_SEED_TOOLS_PER_SERVER` tools).
+const MAX_SEED_BATCH_SERVERS: usize = 256;
 
 /// A pending mutation awaiting commit. The action variant pins what the user
 /// approved — committing a different shape of action rejects.
@@ -68,6 +89,9 @@ enum PendingAction {
     SeedBatch { fingerprint: String },
     /// The user approved removing an index entry for the named server.
     SeedRemove,
+    /// The user approved overwriting an existing single-server seed entry.
+    /// Fingerprint pins the exact `SeedParams` content.
+    Seed { fingerprint: String },
 }
 
 #[derive(Clone)]
@@ -115,11 +139,119 @@ fn cleanup_expired(map: &mut HashMap<String, PendingWrite>) {
 }
 
 fn generate_token() -> String {
-    // 16 hex chars of timestamp nanos — uniquely identifies a propose call.
-    // Cryptographic randomness isn't needed; the token only gates a local write
-    // path that the same process has already authorized via the propose step.
+    // The token gates a local write the same process already authorized via the
+    // propose step, so it is not a secrecy boundary — but it must be unique and
+    // shouldn't read like a guessable clock value in a security-focused crate.
+    // Uniqueness: a process-lifetime monotonic counter is appended, so two
+    // tokens minted in the same nanosecond can never collide (the old bare
+    // timestamp could, silently evicting the earlier pending write).
+    // Unpredictability: a per-process salt seeded from the OS CSPRNG (via
+    // `RandomState`, which draws from getrandom) is hashed in.
+    use std::hash::{BuildHasher, Hash, Hasher};
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    static SALT: OnceLock<std::collections::hash_map::RandomState> = OnceLock::new();
+    let salt = SALT.get_or_init(std::collections::hash_map::RandomState::new);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let ts = Utc::now().timestamp_nanos_opt().unwrap_or(0) as u64;
-    format!("{ts:016x}")
+    let mut h = salt.build_hasher();
+    ts.hash(&mut h);
+    n.hash(&mut h);
+    // The `{n:08x}` suffix guarantees absolute uniqueness even on a hash
+    // collision; the hashed part provides unpredictability.
+    format!("{:016x}{n:08x}", h.finish())
+}
+
+/// Reject `manifest_toml` whose bracket/brace nesting exceeds
+/// [`MAX_TOML_NESTING_DEPTH`], scanning the raw string BEFORE it reaches the
+/// recursive-descent `toml` parser (which would otherwise stack-overflow and
+/// abort the process on deeply-nested input). Brackets inside strings and
+/// comments don't count — only genuine TOML structure does.
+fn check_toml_nesting_depth(s: &str) -> Result<()> {
+    #[derive(PartialEq)]
+    enum St {
+        Normal,
+        Basic,
+        Literal,
+        MlBasic,
+        MlLiteral,
+        Comment,
+    }
+    let mut st = St::Normal;
+    let mut depth: usize = 0;
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        match st {
+            St::Normal => match b {
+                b'#' => st = St::Comment,
+                b'"' => {
+                    if bytes[i..].starts_with(b"\"\"\"") {
+                        st = St::MlBasic;
+                        i += 3;
+                        continue;
+                    }
+                    st = St::Basic;
+                }
+                b'\'' => {
+                    if bytes[i..].starts_with(b"'''") {
+                        st = St::MlLiteral;
+                        i += 3;
+                        continue;
+                    }
+                    st = St::Literal;
+                }
+                b'[' | b'{' => {
+                    depth += 1;
+                    if depth > MAX_TOML_NESTING_DEPTH {
+                        anyhow::bail!(
+                            "Error: `manifest_toml` nests brackets/braces deeper than \
+                             {MAX_TOML_NESTING_DEPTH} levels. \
+                             Action: real manifests nest only a few levels — this payload \
+                             looks malformed or hostile. Flatten the structure and retry."
+                        );
+                    }
+                }
+                b']' | b'}' => depth = depth.saturating_sub(1),
+                _ => {}
+            },
+            St::Comment => {
+                if b == b'\n' {
+                    st = St::Normal;
+                }
+            }
+            St::Basic => match b {
+                b'\\' => i += 1, // skip the escaped char (plus the +=1 below)
+                b'"' => st = St::Normal,
+                _ => {}
+            },
+            St::Literal => {
+                if b == b'\'' {
+                    st = St::Normal;
+                }
+            }
+            St::MlBasic => {
+                if b == b'\\' {
+                    i += 1;
+                } else if bytes[i..].starts_with(b"\"\"\"") {
+                    st = St::Normal;
+                    i += 3;
+                    continue;
+                }
+            }
+            St::MlLiteral => {
+                if bytes[i..].starts_with(b"'''") {
+                    st = St::Normal;
+                    i += 3;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    Ok(())
 }
 
 // =================== Parameter / response types ===================
@@ -193,6 +325,13 @@ pub struct SeedParams {
     /// every collision under a single user approval.
     #[serde(default)]
     pub overwrite: bool,
+    /// Required ONLY when overwriting an existing entry. The first call with
+    /// `overwrite=true` returns a preview + token; re-call with the SAME content
+    /// plus this token to commit. Omit for first-install adds (no existing entry)
+    /// and on the initial overwrite propose call. Ignored inside
+    /// `librarian_seed_batch` (the batch has its own single token).
+    #[serde(default)]
+    pub confirm_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -355,8 +494,11 @@ impl LibrarianServer {
         name = "librarian_seed_playbook",
         description = "Bootstrap a single server entry from the tool list you already see in your context. \
                        Use this for remote/cloud servers the librarian can't probe directly. \
-                       REFUSES to replace an existing index entry by default — pass `overwrite=true` \
-                       to confirm you intend to replace a probed or previously-seeded entry. \
+                       Adding a NEW entry (no existing server of that name) is a one-shot fast path. \
+                       OVERWRITING an existing entry is gated: pass `overwrite=true` WITHOUT a token to \
+                       get a preview + confirm_token, show it to the user, then re-call with the SAME \
+                       content plus `overwrite=true` and `confirm_token` to commit. This stops an entry \
+                       (e.g. a real probed server) from being silently replaced. \
                        For first-install onboarding of MANY hosted servers at once, prefer \
                        `librarian_seed_batch` — one user approval covers the whole batch and \
                        its preview shows every collision."
@@ -817,68 +959,150 @@ impl LibrarianServer {
 
     fn seed_inner(&self, p: SeedParams) -> Result<String> {
         validate_server_name(&p.server)?;
-        let now = Utc::now();
-        let tool_count = p.tools.len();
-        let server_name = p.server.clone();
-        let overwrite = p.overwrite;
-        let tools: Vec<IndexedTool> = p
-            .tools
-            .into_iter()
-            .map(|t| IndexedTool {
-                name: t.name,
-                description: t.description,
-                arg_summary: if t.required.is_empty() && t.properties.is_empty() {
-                    None
-                } else {
-                    Some(ArgSummary {
-                        required: t.required,
-                        properties: t.properties,
-                    })
-                },
-            })
-            .collect();
-        let entry = ServerEntry {
-            name: server_name.clone(),
-            transport_descriptor: "seeded by agent".to_string(),
-            probeable: false,
-            probe_status: ProbeStatus::Seeded,
-            indexed_at: now,
-            tools,
-            summary: p.summary,
-            category: p.category,
-        };
+        enforce_seed_caps(&p)?;
 
-        // Lock around load-modify-save so a concurrent seed/refresh doesn't
-        // produce a lost update. Also load FIRST so the existing-entry check
-        // runs against the canonical on-disk state, not a stale snapshot.
+        match &p.confirm_token {
+            // No token: either a first-install fast-path add (no existing entry)
+            // or the propose step of an overwrite (existing entry + overwrite).
+            None => {
+                let existing = {
+                    let index = Index::load(&self.paths.cache_file)?;
+                    index
+                        .servers
+                        .get(&p.server)
+                        .map(|e| (status_label(&e.probe_status), e.tools.len()))
+                };
+                match existing {
+                    // First install: nothing to clobber → add directly (ungated
+                    // fast path, the common first-install case).
+                    None => {
+                        self.seed_write_locked(&p, false)?;
+                        Ok(format!(
+                            "seeded `{}` with {} tools",
+                            p.server,
+                            p.tools.len()
+                        ))
+                    }
+                    // Existing entry, no overwrite intent → refuse (unchanged UX).
+                    Some((status, prior_tools)) if !p.overwrite => anyhow::bail!(
+                        "Error: `{}` already exists in the index ({status}, {prior_tools} tools). \
+                         `librarian_seed_playbook` refuses to overwrite by default so a probed entry \
+                         can't be silently replaced with arbitrary seed content. \
+                         Action: if this is genuinely a re-seed (e.g. the hosted tool list expanded), \
+                         re-call with `overwrite=true` to get a preview + confirm_token. If you're \
+                         seeding several servers at once, `librarian_seed_batch` shows every collision \
+                         in one preview under a single user approval.",
+                        p.server,
+                    ),
+                    // Existing entry + overwrite=true → REQUIRE explicit approval.
+                    // Previously this path was ungated: a prompt-injected agent
+                    // could silently replace a real probed entry in one call. Now
+                    // it must propose, surface a preview + token, and commit.
+                    Some((status, prior_tools)) => {
+                        let fingerprint = seed_fingerprint(&p);
+                        let pending = PendingWrite {
+                            server: p.server.clone(),
+                            action: PendingAction::Seed { fingerprint },
+                            expires_at: Utc::now()
+                                + chrono::Duration::seconds(PENDING_WRITE_TTL_SECS),
+                        };
+                        let token = self.issue_token(pending);
+                        let safe_summary = sanitize_for_preview(p.summary.as_deref());
+
+                        let mut preview = String::new();
+                        preview.push_str("## SEED OVERWRITE - PREVIEW (NOT YET COMMITTED)\n\n");
+                        let _ = writeln!(
+                            preview,
+                            "This REPLACES the existing `{}` entry ({status}, {prior_tools} tools) \
+                             with seeded content ({} tools).",
+                            p.server,
+                            p.tools.len(),
+                        );
+                        if let Some(s) = &safe_summary {
+                            let _ = writeln!(preview, "New summary: {s}");
+                        }
+                        if let Some(c) = &p.category {
+                            let _ = writeln!(preview, "New category: {c}");
+                        }
+                        let _ = writeln!(
+                            preview,
+                            "\n---\n\
+                             REVIEW REQUIRED. Show the preview above to the user. Ask them to type \
+                             \"I agree\" or \"yes\" to commit. Once they approve, re-call \
+                             librarian_seed_playbook with the SAME content plus:\n  \
+                             server=\"{}\", overwrite=true, confirm_token=\"{token}\".\n\n\
+                             Token expires in {} minutes and is single-use. \
+                             Any change to the seeded content rejects the commit.",
+                            p.server,
+                            PENDING_WRITE_TTL_SECS / 60,
+                        );
+                        Ok(preview)
+                    }
+                }
+            }
+            // Token present: commit an approved overwrite.
+            Some(token) => {
+                let pending = self.consume_token(token).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Error: `confirm_token` is not recognized, already used, or expired. \
+                         Action: re-call `librarian_seed_playbook` with overwrite=true (no token) \
+                         to get a fresh preview + token."
+                    )
+                })?;
+                if pending.server != p.server {
+                    anyhow::bail!(
+                        "Error: `confirm_token` was issued for server `{}`, but this commit is for `{}`. \
+                         Action: re-call with overwrite=true (no token) for the correct server.",
+                        pending.server,
+                        p.server,
+                    );
+                }
+                let token_fp = match &pending.action {
+                    PendingAction::Seed { fingerprint } => fingerprint,
+                    _ => anyhow::bail!(
+                        "Error: `confirm_token` was issued for a different action (not a single-server \
+                         seed overwrite). Action: re-call `librarian_seed_playbook` with overwrite=true \
+                         (no token) to get a seed-specific token."
+                    ),
+                };
+                if &seed_fingerprint(&p) != token_fp {
+                    anyhow::bail!(
+                        "Error: seed content differs from what was proposed and approved. The user \
+                         approved a specific entry; you are now committing different content. \
+                         Action: re-call with overwrite=true (no token) using the CURRENT content to \
+                         get a fresh preview + token, then have the user approve it."
+                    );
+                }
+                let tool_count = p.tools.len();
+                self.seed_write_locked(&p, true)?;
+                Ok(format!(
+                    "seeded `{}` with {tool_count} tools (overwrote existing entry)",
+                    p.server
+                ))
+            }
+        }
+    }
+
+    /// Build the index entry for a seed and write it under the cross-process
+    /// lock. `allow_overwrite=false` guards the first-install fast path: if
+    /// another process added the entry between the existence peek and here, we
+    /// refuse rather than clobber it. `allow_overwrite=true` is used only after
+    /// an approved overwrite commit.
+    fn seed_write_locked(&self, p: &SeedParams, allow_overwrite: bool) -> Result<()> {
         lockfile::with_write_lock(&self.paths, || {
             let mut index = Index::load(&self.paths.cache_file)?;
-            if !overwrite && let Some(existing) = index.servers.get(&server_name) {
-                let prior_status = match &existing.probe_status {
-                    ProbeStatus::Ok => "probed",
-                    ProbeStatus::Seeded => "seeded",
-                    ProbeStatus::ManifestOnly => "manifest-only",
-                    ProbeStatus::NotProbeable => "not-probeable",
-                    ProbeStatus::Timeout => "timed-out",
-                    ProbeStatus::Failed(_) => "failed",
-                };
-                let prior_tool_count = existing.tools.len();
+            if !allow_overwrite && index.servers.contains_key(&p.server) {
                 anyhow::bail!(
-                    "Error: `{}` already exists in the index ({prior_status}, {prior_tool_count} tools). \
-                     `librarian_seed_playbook` refuses to overwrite by default so a probed entry \
-                     can't be silently replaced with arbitrary seed content. \
-                     Action: if this is genuinely a re-seed (e.g. the hosted tool list expanded), \
-                     re-call with `overwrite=true`. If you're seeding several servers at once, \
-                     `librarian_seed_batch` shows every collision in one preview under a single \
-                     user approval.",
-                    server_name,
+                    "Error: `{}` was added to the index by another process between propose and \
+                     commit. Action: re-call `librarian_seed_playbook` to re-evaluate — it will \
+                     now see the existing entry and require overwrite=true plus approval.",
+                    p.server,
                 );
             }
-            index.servers.insert(server_name.clone(), entry);
+            index.servers.insert(p.server.clone(), build_seed_entry(p));
             index.save(&self.paths.cache_file)?;
             Ok(())
-        })?;
-        Ok(format!("seeded `{}` with {tool_count} tools", server_name))
+        })
     }
 
     fn seed_remove_inner(&self, p: SeedRemoveParams) -> Result<String> {
@@ -1025,17 +1249,26 @@ impl LibrarianServer {
     }
 
     fn seed_batch_inner(&self, p: SeedBatchParams) -> Result<String> {
-        // Validate up front: non-empty, no name collisions within the batch,
-        // every server name passes the path-traversal validator.
+        // Validate up front: non-empty, within the batch-size cap, no name
+        // collisions within the batch, every server name passes the
+        // path-traversal validator, and every entry is within the seed caps.
         if p.servers.is_empty() {
             anyhow::bail!(
                 "Error: `servers` is empty. Action: pass at least one server entry. \
                  For zero servers, just don't call this tool."
             );
         }
+        if p.servers.len() > MAX_SEED_BATCH_SERVERS {
+            anyhow::bail!(
+                "Error: batch lists {} servers; cap is {MAX_SEED_BATCH_SERVERS}. \
+                 Action: split into smaller batches. No real client has this many MCP servers.",
+                p.servers.len(),
+            );
+        }
         let mut seen_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for item in &p.servers {
             validate_server_name(&item.server)?;
+            enforce_seed_caps(item)?;
             if !seen_names.insert(item.server.as_str()) {
                 anyhow::bail!(
                     "Error: server name `{}` appears more than once in the batch. \
@@ -1331,6 +1564,11 @@ impl LibrarianServer {
                  recommended path for non-trivial content."
             ),
             (Some(toml_str), None) => {
+                // Depth-guard BEFORE any parse: this arm parses the string twice
+                // (once into `Manifest`, once into `toml::Value` inside
+                // `detect_misplaced_gotchas`), and both go through the same
+                // recursion-unbounded parser that would stack-overflow.
+                check_toml_nesting_depth(toml_str)?;
                 let manifest = toml::from_str::<Manifest>(toml_str).map_err(|e| {
                     anyhow::anyhow!(
                         "Error: failed to parse `manifest_toml`: {e}. \
@@ -1453,7 +1691,8 @@ impl LibrarianServer {
                     } => (fingerprint, *overwrite),
                     PendingAction::Restore
                     | PendingAction::SeedBatch { .. }
-                    | PendingAction::SeedRemove => anyhow::bail!(
+                    | PendingAction::SeedRemove
+                    | PendingAction::Seed { .. } => anyhow::bail!(
                         "Error: `confirm_token` was issued for a different action (not a manifest write). \
                          Action: re-call `librarian_manifest_write` without `confirm_token` to \
                          get a write-specific token."
@@ -1768,7 +2007,128 @@ const STOP_WORDS: &[&str] = &[
 /// call carries the exact list the user approved. Same pattern as
 /// `manifest_fingerprint`: serialize to JSON and compare strings.
 fn seed_batch_fingerprint(items: &[SeedParams]) -> String {
-    serde_json::to_string(items).unwrap_or_default()
+    // Exclude the per-entry confirm_token (the batch carries its own single
+    // token) so propose and commit fingerprints compare on content alone.
+    let content: Vec<SeedParams> = items
+        .iter()
+        .map(|i| {
+            let mut c = i.clone();
+            c.confirm_token = None;
+            c
+        })
+        .collect();
+    serde_json::to_string(&content).unwrap_or_default()
+}
+
+/// Content fingerprint for a single-server seed overwrite. Excludes
+/// `confirm_token` so the propose call (no token) and the commit call (token
+/// present) fingerprint identically when the content matches.
+fn seed_fingerprint(p: &SeedParams) -> String {
+    let mut c = p.clone();
+    c.confirm_token = None;
+    serde_json::to_string(&c).unwrap_or_default()
+}
+
+/// Short human label for a probe status, used in seed previews and refusals.
+fn status_label(s: &ProbeStatus) -> &'static str {
+    match s {
+        ProbeStatus::Ok => "probed",
+        ProbeStatus::Seeded => "seeded",
+        ProbeStatus::ManifestOnly => "manifest-only",
+        ProbeStatus::NotProbeable => "not-probeable",
+        ProbeStatus::Timeout => "timed-out",
+        ProbeStatus::Failed(_) => "failed",
+    }
+}
+
+/// Build a `ServerEntry` from seed params (clones; leaves the caller's params
+/// intact so they can still be fingerprinted).
+fn build_seed_entry(p: &SeedParams) -> ServerEntry {
+    let tools = p
+        .tools
+        .iter()
+        .map(|t| IndexedTool {
+            name: t.name.clone(),
+            description: t.description.clone(),
+            arg_summary: if t.required.is_empty() && t.properties.is_empty() {
+                None
+            } else {
+                Some(ArgSummary {
+                    required: t.required.clone(),
+                    properties: t.properties.clone(),
+                })
+            },
+        })
+        .collect();
+    ServerEntry {
+        name: p.server.clone(),
+        transport_descriptor: "seeded by agent".to_string(),
+        probeable: false,
+        probe_status: ProbeStatus::Seeded,
+        indexed_at: Utc::now(),
+        tools,
+        summary: p.summary.clone(),
+        category: p.category.clone(),
+    }
+}
+
+/// Bound a single seed's payload so an agent can't bloat the always-re-parsed
+/// `index.json`. See the `MAX_SEED_*` constants for rationale.
+fn enforce_seed_caps(p: &SeedParams) -> Result<()> {
+    if p.tools.len() > MAX_SEED_TOOLS_PER_SERVER {
+        anyhow::bail!(
+            "Error: seed for `{}` lists {} tools; cap is {MAX_SEED_TOOLS_PER_SERVER}. \
+             Action: real MCP servers expose far fewer — seed only the tools that matter.",
+            p.server,
+            p.tools.len(),
+        );
+    }
+    if let Some(s) = &p.summary
+        && s.len() > MAX_SEED_TEXT_BYTES
+    {
+        anyhow::bail!(
+            "Error: seed `summary` for `{}` is {} bytes; cap is {MAX_SEED_TEXT_BYTES}. \
+             Action: a summary is one line — trim it.",
+            p.server,
+            s.len(),
+        );
+    }
+    if let Some(c) = &p.category
+        && c.len() > MAX_SEED_TEXT_BYTES
+    {
+        anyhow::bail!(
+            "Error: seed `category` for `{}` is {} bytes; cap is {MAX_SEED_TEXT_BYTES}.",
+            p.server,
+            c.len(),
+        );
+    }
+    for t in &p.tools {
+        if t.name.len() > MAX_SEED_TOOL_NAME_BYTES {
+            anyhow::bail!(
+                "Error: a seed tool name is {} bytes; cap is {MAX_SEED_TOOL_NAME_BYTES}. \
+                 Action: tool names are short identifiers.",
+                t.name.len(),
+            );
+        }
+        if t.description.len() > MAX_SEED_TEXT_BYTES {
+            anyhow::bail!(
+                "Error: the description for seed tool `{}` is {} bytes; cap is {MAX_SEED_TEXT_BYTES}. \
+                 Action: keep tool descriptions to a sentence or two.",
+                t.name,
+                t.description.len(),
+            );
+        }
+        for (k, v) in &t.properties {
+            if k.len() > MAX_SEED_TOOL_NAME_BYTES || v.len() > MAX_SEED_TEXT_BYTES {
+                anyhow::bail!(
+                    "Error: an arg hint on seed tool `{}` exceeds the size cap. \
+                     Action: keep arg names and hints short.",
+                    t.name,
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Scan a raw TOML string for `gotchas` keys that landed inside a sub-table or
@@ -2429,6 +2789,7 @@ summary = "minimal"
                     properties: Default::default(),
                 }],
                 overwrite: false,
+                confirm_token: None,
             })
             .unwrap();
 
@@ -2466,6 +2827,7 @@ summary = "minimal"
                 category: Some("comms".into()),
                 tools: vec![],
                 overwrite: false,
+                confirm_token: None,
             })
             .unwrap();
         assert!(
@@ -2535,6 +2897,7 @@ summary = "minimal"
                     properties: Default::default(),
                 }],
                 overwrite: false,
+                confirm_token: None,
             })
             .unwrap();
         let err = server
@@ -2544,6 +2907,7 @@ summary = "minimal"
                 category: None,
                 tools: vec![],
                 overwrite: false,
+                confirm_token: None,
             })
             .unwrap_err();
         let msg = format!("{err:#}");
@@ -2557,9 +2921,11 @@ summary = "minimal"
     }
 
     #[test]
-    fn seed_with_overwrite_true_replaces() {
-        // The escape hatch: when the agent genuinely intends to replace,
-        // overwrite=true must succeed and the new content must win.
+    fn seed_overwrite_is_gated_propose_then_commit() {
+        // The escape hatch is now two-step: overwrite=true WITHOUT a token must
+        // only PREVIEW (the existing entry stays intact); a commit with the
+        // matching token replaces it. This is the B4 fix — an ungated overwrite
+        // previously let a prompt-injected agent silently clobber a real entry.
         let (_tmp, paths) = test_paths();
         let server = LibrarianServer::new(paths.clone());
         server
@@ -2574,27 +2940,170 @@ summary = "minimal"
                     properties: Default::default(),
                 }],
                 overwrite: false,
+                confirm_token: None,
             })
             .unwrap();
-        server
-            .seed_inner(SeedParams {
-                server: "collide".into(),
-                summary: Some("replaced".into()),
-                category: None,
-                tools: vec![SeedTool {
-                    name: "t2".into(),
-                    description: "".into(),
-                    required: vec![],
-                    properties: Default::default(),
-                }],
-                overwrite: true,
-            })
-            .unwrap();
+
+        let replacement = SeedParams {
+            server: "collide".into(),
+            summary: Some("replaced".into()),
+            category: None,
+            tools: vec![SeedTool {
+                name: "t2".into(),
+                description: "".into(),
+                required: vec![],
+                properties: Default::default(),
+            }],
+            overwrite: true,
+            confirm_token: None,
+        };
+
+        // Propose: overwrite=true, no token → preview only, NOT applied.
+        let preview = server.seed_inner(replacement.clone()).unwrap();
+        assert!(
+            preview.contains("PREVIEW (NOT YET COMMITTED)") && preview.contains("confirm_token"),
+            "expected an overwrite preview + token, got: {preview}"
+        );
+        let after_propose = crate::index::Index::load(&paths.cache_file).unwrap();
+        assert_eq!(
+            after_propose
+                .servers
+                .get("collide")
+                .unwrap()
+                .summary
+                .as_deref(),
+            Some("first"),
+            "propose must NOT mutate the existing entry"
+        );
+
+        // Commit: same content + token → replaced.
+        let token = extract_token(&preview);
+        let mut commit = replacement.clone();
+        commit.confirm_token = Some(token);
+        server.seed_inner(commit).unwrap();
         let idx = crate::index::Index::load(&paths.cache_file).unwrap();
         let entry = idx.servers.get("collide").unwrap();
         assert_eq!(entry.summary.as_deref(), Some("replaced"));
         assert_eq!(entry.tools.len(), 1);
         assert_eq!(entry.tools[0].name, "t2");
+    }
+
+    #[test]
+    fn seed_overwrite_commit_rejects_content_drift() {
+        // A token issued for one overwrite must not commit different content.
+        let (_tmp, paths) = test_paths();
+        let server = LibrarianServer::new(paths.clone());
+        server
+            .seed_inner(SeedParams {
+                server: "drift".into(),
+                summary: Some("orig".into()),
+                category: None,
+                tools: vec![],
+                overwrite: false,
+                confirm_token: None,
+            })
+            .unwrap();
+        let proposed = SeedParams {
+            server: "drift".into(),
+            summary: Some("v2".into()),
+            category: None,
+            tools: vec![],
+            overwrite: true,
+            confirm_token: None,
+        };
+        let preview = server.seed_inner(proposed.clone()).unwrap();
+        let token = extract_token(&preview);
+        // Commit DIFFERENT content with the same token → must reject.
+        let mut tampered = proposed.clone();
+        tampered.summary = Some("v3-not-approved".into());
+        tampered.confirm_token = Some(token);
+        let err = server.seed_inner(tampered).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("differs from what was proposed"),
+            "expected content-drift rejection"
+        );
+        // Original entry untouched.
+        let idx = crate::index::Index::load(&paths.cache_file).unwrap();
+        assert_eq!(
+            idx.servers.get("drift").unwrap().summary.as_deref(),
+            Some("orig")
+        );
+    }
+
+    #[test]
+    fn toml_depth_guard_rejects_deep_nesting_but_allows_real_manifests() {
+        // Shallow real-manifest nesting is fine.
+        check_toml_nesting_depth("gotchas = [\"a\", \"b\"]\n[[workflows]]\nname = \"x\"\n")
+            .unwrap();
+        check_toml_nesting_depth("a = [[1, 2], [3, 4]]\n").unwrap();
+        // Brackets inside strings and comments must NOT count toward depth.
+        let s = format!("x = \"{}\"\n# {}\n", "[".repeat(200), "[".repeat(200));
+        check_toml_nesting_depth(&s).unwrap();
+        let s2 = format!("x = '''{}'''\n", "[".repeat(200));
+        check_toml_nesting_depth(&s2).unwrap();
+        // Deeply-nested arrays (the stack-overflow payload) must be rejected,
+        // and the payload is tiny — far under the byte cap.
+        let deep = format!("x={}{}", "[".repeat(200), "]".repeat(200));
+        assert!(deep.len() < 1024);
+        let err = check_toml_nesting_depth(&deep).unwrap_err();
+        assert!(format!("{err:#}").contains("nests brackets/braces deeper"));
+        // Inline-table nesting counts too.
+        let deep_tbl = format!("x={}{}", "{a=".repeat(64), "}".repeat(64));
+        assert!(check_toml_nesting_depth(&deep_tbl).is_err());
+    }
+
+    #[test]
+    fn manifest_write_rejects_deeply_nested_toml_before_parsing() {
+        // End-to-end: the deep payload is refused at the tool boundary with a
+        // diagnostic, never reaching the recursive parser (which would abort).
+        let (_tmp, paths) = test_paths();
+        let server = LibrarianServer::new(paths);
+        let deep = format!("x={}{}", "[".repeat(300), "]".repeat(300));
+        let err = server
+            .manifest_write_inner(ManifestWriteParams {
+                server: "victim".into(),
+                manifest_toml: Some(deep),
+                manifest: None,
+                confirm_token: None,
+                overwrite: false,
+            })
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("nests brackets/braces deeper"));
+    }
+
+    #[test]
+    fn generate_token_is_unique_under_rapid_calls() {
+        // The old bare-nanosecond token could collide within a tick, silently
+        // evicting a pending write. The counter suffix guarantees uniqueness.
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..10_000 {
+            assert!(seen.insert(generate_token()), "duplicate token generated");
+        }
+    }
+
+    #[test]
+    fn seed_caps_reject_oversized_payload() {
+        let (_tmp, paths) = test_paths();
+        let server = LibrarianServer::new(paths);
+        let too_many = (0..MAX_SEED_TOOLS_PER_SERVER + 1)
+            .map(|i| SeedTool {
+                name: format!("t{i}"),
+                description: String::new(),
+                required: vec![],
+                properties: Default::default(),
+            })
+            .collect();
+        let err = server
+            .seed_inner(SeedParams {
+                server: "bloat".into(),
+                summary: None,
+                category: None,
+                tools: too_many,
+                overwrite: false,
+                confirm_token: None,
+            })
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("cap is"));
     }
 
     #[test]
@@ -2609,6 +3118,7 @@ summary = "minimal"
                 category: None,
                 tools: vec![],
                 overwrite: false,
+                confirm_token: None,
             })
             .unwrap();
         // And write a manifest for the same name
@@ -2650,6 +3160,7 @@ summary = "minimal"
                     category: None,
                     tools: vec![],
                     overwrite: false,
+                    confirm_token: None,
                 })
                 .unwrap();
         }
@@ -2688,6 +3199,7 @@ summary = "minimal"
                         properties: Default::default(),
                     }],
                     overwrite: false,
+                    confirm_token: None,
                 },
                 SeedParams {
                     server: "claude.ai_Bar".into(),
@@ -2695,6 +3207,7 @@ summary = "minimal"
                     category: Some("knowledge".into()),
                     tools: vec![],
                     overwrite: false,
+                    confirm_token: None,
                 },
             ],
             confirm_token: None,
@@ -2733,6 +3246,7 @@ summary = "minimal"
                     properties: Default::default(),
                 }],
                 overwrite: false,
+                confirm_token: None,
             },
             SeedParams {
                 server: "claude.ai_Two".into(),
@@ -2740,6 +3254,7 @@ summary = "minimal"
                 category: Some("knowledge".into()),
                 tools: vec![],
                 overwrite: false,
+                confirm_token: None,
             },
         ];
         let propose = server
@@ -2773,6 +3288,7 @@ summary = "minimal"
             category: None,
             tools: vec![],
             overwrite: false,
+            confirm_token: None,
         }];
         let propose = server
             .seed_batch_inner(SeedBatchParams {
@@ -2789,6 +3305,7 @@ summary = "minimal"
             category: None,
             tools: vec![],
             overwrite: false,
+            confirm_token: None,
         }];
         let err = server
             .seed_batch_inner(SeedBatchParams {
@@ -2812,6 +3329,7 @@ summary = "minimal"
                         category: None,
                         tools: vec![],
                         overwrite: false,
+                        confirm_token: None,
                     },
                     SeedParams {
                         server: "dup".into(),
@@ -2819,6 +3337,7 @@ summary = "minimal"
                         category: None,
                         tools: vec![],
                         overwrite: false,
+                        confirm_token: None,
                     },
                 ],
                 confirm_token: None,
@@ -2840,6 +3359,7 @@ summary = "minimal"
                         category: None,
                         tools: vec![],
                         overwrite: false,
+                        confirm_token: None,
                     },
                     SeedParams {
                         server: "../escape".into(),
@@ -2847,6 +3367,7 @@ summary = "minimal"
                         category: None,
                         tools: vec![],
                         overwrite: false,
+                        confirm_token: None,
                     },
                 ],
                 confirm_token: None,
@@ -2868,6 +3389,7 @@ summary = "minimal"
                 category: Some("comms".into()),
                 tools: vec![],
                 overwrite: false,
+                confirm_token: None,
             })
             .unwrap();
         // Now propose a batch that collides with it.
@@ -2880,6 +3402,7 @@ summary = "minimal"
                         category: Some("comms".into()),
                         tools: vec![],
                         overwrite: false,
+                        confirm_token: None,
                     },
                     SeedParams {
                         server: "claude.ai_New".into(),
@@ -2887,6 +3410,7 @@ summary = "minimal"
                         category: None,
                         tools: vec![],
                         overwrite: false,
+                        confirm_token: None,
                     },
                 ],
                 confirm_token: None,
@@ -2933,6 +3457,7 @@ summary = "minimal"
                 category: None,
                 tools: vec![],
                 overwrite: false,
+                confirm_token: None,
             })
             .unwrap_err();
         let msg = format!("{err:#}");
@@ -3198,8 +3723,8 @@ summary = "minimal"
         // contains "in" or "a" — those tokens get filtered.
         let q = "files in a repo";
         let tokens: Vec<&str> = q.split_whitespace().collect();
-        // "forge_sprint_status" doesn't contain "files" or "repo" — should score 0
-        let score = rank(q, &tokens, "forge_sprint_status", "Check sprint state", "");
+        // "acme_sprint_status" doesn't contain "files" or "repo" — should score 0
+        let score = rank(q, &tokens, "acme_sprint_status", "Check sprint state", "");
         assert_eq!(
             score, 0,
             "stop-word and short-token matches must not contribute to score"
@@ -3252,7 +3777,7 @@ summary = "minimal"
     }
 
     #[test]
-    fn search_with_tool_aliases_surfaces_codeview_above_lexical_noise() {
+    fn search_with_tool_aliases_surfaces_repoindex_above_lexical_noise() {
         // End-to-end repro of the alias-routing failure: an intent-style
         // query whose meaningful tokens don't overlap with the right tool's
         // name. With an authored alias on the right tool, search must rank
@@ -3262,11 +3787,11 @@ summary = "minimal"
         let (_tmp, paths) = test_paths();
         let server = LibrarianServer::new(paths.clone());
 
-        // Seed two servers: codeview (with grep + outline) and slack
+        // Seed two servers: repoindex (with grep + outline) and slack
         // (with a search-named tool that shouldn't win on intent).
         server
             .seed_inner(SeedParams {
-                server: "codeview".into(),
+                server: "repoindex".into(),
                 summary: Some("read-only code inspection".into()),
                 category: Some("developer-tools".into()),
                 tools: vec![
@@ -3284,6 +3809,7 @@ summary = "minimal"
                     },
                 ],
                 overwrite: false,
+                confirm_token: None,
             })
             .unwrap();
         server
@@ -3298,14 +3824,15 @@ summary = "minimal"
                     properties: Default::default(),
                 }],
                 overwrite: false,
+                confirm_token: None,
             })
             .unwrap();
 
-        // Author a manifest for codeview aliasing `outline` to intent phrases
+        // Author a manifest for repoindex aliasing `outline` to intent phrases
         // that DO share tokens with the failing query.
         crate::playbook::write_manifest(
             &paths,
-            "codeview",
+            "repoindex",
             &Manifest {
                 tool_aliases: vec![crate::playbook::ToolAlias {
                     tool: "outline".into(),
@@ -3334,15 +3861,15 @@ summary = "minimal"
             })
             .unwrap();
 
-        // codeview/outline should appear BEFORE any slack_* tool.
+        // repoindex/outline should appear BEFORE any slack_* tool.
         let outline_pos = result
-            .find("codeview / outline")
-            .expect("codeview/outline should be in results");
+            .find("repoindex / outline")
+            .expect("repoindex/outline should be in results");
         let slack_pos = result.find("slack_search_channels");
         if let Some(sp) = slack_pos {
             assert!(
                 outline_pos < sp,
-                "codeview/outline must rank above slack search:\n{result}"
+                "repoindex/outline must rank above slack search:\n{result}"
             );
         }
     }
@@ -3350,14 +3877,14 @@ summary = "minimal"
     #[test]
     fn search_aliases_inert_when_query_doesnt_match_phrases() {
         // Aliases must boost ONLY when the query content actually overlaps
-        // with a phrase. A slack query shouldn't surface codeview just
-        // because codeview HAS some aliases.
+        // with a phrase. A slack query shouldn't surface repoindex just
+        // because repoindex HAS some aliases.
         use rmcp::handler::server::wrapper::Parameters;
         let (_tmp, paths) = test_paths();
         let server = LibrarianServer::new(paths.clone());
         server
             .seed_inner(SeedParams {
-                server: "codeview".into(),
+                server: "repoindex".into(),
                 summary: Some("code".into()),
                 category: Some("dev".into()),
                 tools: vec![SeedTool {
@@ -3367,6 +3894,7 @@ summary = "minimal"
                     properties: Default::default(),
                 }],
                 overwrite: false,
+                confirm_token: None,
             })
             .unwrap();
         server
@@ -3381,11 +3909,12 @@ summary = "minimal"
                     properties: Default::default(),
                 }],
                 overwrite: false,
+                confirm_token: None,
             })
             .unwrap();
         crate::playbook::write_manifest(
             &paths,
-            "codeview",
+            "repoindex",
             &Manifest {
                 tool_aliases: vec![crate::playbook::ToolAlias {
                     tool: "outline".into(),
@@ -3412,10 +3941,10 @@ summary = "minimal"
         if let Some(sp) = slack_pos {
             // Codeview entries may or may not be present; if present they
             // must rank below slack.
-            if let Some(cv_pos) = result.find("codeview / outline") {
+            if let Some(cv_pos) = result.find("repoindex / outline") {
                 assert!(
                     sp < cv_pos,
-                    "slack must rank above codeview when query is slack-shaped:\n{result}"
+                    "slack must rank above repoindex when query is slack-shaped:\n{result}"
                 );
             }
         }
@@ -3432,7 +3961,7 @@ summary = "minimal"
         let server = LibrarianServer::new(paths.clone());
         server
             .seed_inner(SeedParams {
-                server: "codeview".into(),
+                server: "repoindex".into(),
                 summary: Some("code".into()),
                 category: Some("dev".into()),
                 tools: vec![SeedTool {
@@ -3442,14 +3971,15 @@ summary = "minimal"
                     properties: Default::default(),
                 }],
                 overwrite: false,
+                confirm_token: None,
             })
             .unwrap();
         // Alias points at `ghost_tool` which isn't in the seeded tool list.
         // Phrases share tokens with the query, but should NOT surface any
-        // codeview tool because of this alias.
+        // repoindex tool because of this alias.
         crate::playbook::write_manifest(
             &paths,
-            "codeview",
+            "repoindex",
             &Manifest {
                 tool_aliases: vec![crate::playbook::ToolAlias {
                     tool: "ghost_tool".into(),
@@ -3472,10 +4002,10 @@ summary = "minimal"
             })
             .unwrap();
 
-        // No codeview tool should appear in the results — the alias is
+        // No repoindex tool should appear in the results — the alias is
         // attached to a tool that doesn't exist, so it has no host to boost.
         assert!(
-            !result.contains("codeview /"),
+            !result.contains("repoindex /"),
             "alias attached to a non-existent tool must not surface unrelated tools:\n{result}"
         );
     }
@@ -3544,7 +4074,7 @@ summary = "minimal"
         let server = LibrarianServer::new(paths.clone());
         server
             .seed_inner(SeedParams {
-                server: "codeview".into(),
+                server: "repoindex".into(),
                 summary: Some("code".into()),
                 category: Some("dev".into()),
                 tools: vec![
@@ -3562,11 +4092,12 @@ summary = "minimal"
                     },
                 ],
                 overwrite: false,
+                confirm_token: None,
             })
             .unwrap();
         crate::playbook::write_manifest(
             &paths,
-            "codeview",
+            "repoindex",
             &Manifest {
                 tool_aliases: vec![
                     crate::playbook::ToolAlias {
@@ -3599,9 +4130,9 @@ summary = "minimal"
             })
             .unwrap();
         let outline_pos = result
-            .find("codeview / outline")
+            .find("repoindex / outline")
             .expect("outline should appear in results");
-        if let Some(grep_pos) = result.find("codeview / grep") {
+        if let Some(grep_pos) = result.find("repoindex / grep") {
             assert!(
                 outline_pos < grep_pos,
                 "outline (full phrase match) must rank above grep on pure intent query:\n{result}"
@@ -3613,10 +4144,10 @@ summary = "minimal"
     fn rank_alias_does_not_boost_unrelated_queries() {
         // Aliases must only boost queries whose content actually matches an
         // alias phrase. A query about Slack channels shouldn't surface a
-        // codeview tool just because that tool has *any* aliases.
+        // repoindex tool just because that tool has *any* aliases.
         let q = "slack channel message";
         let tokens: Vec<&str> = q.split_whitespace().collect();
-        let codeview_alias_score = rank(
+        let repoindex_alias_score = rank(
             q,
             &tokens,
             "outline",
@@ -3624,7 +4155,7 @@ summary = "minimal"
             "find function locate definition symbol lookup",
         );
         assert_eq!(
-            codeview_alias_score, 0,
+            repoindex_alias_score, 0,
             "alias must not boost a tool when query has zero overlap with phrases"
         );
     }

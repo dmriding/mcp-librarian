@@ -9,6 +9,14 @@ use std::path::Path;
 use crate::config::Paths;
 use crate::discovery::{ServerConfig, Transport};
 
+/// Backstop ceiling on the serialized `index.json`. `index.json` is read and
+/// re-parsed on essentially every tool call, so unbounded growth is a
+/// persistent cost amplifier. Per-seed caps (in `server.rs`) bound each entry;
+/// this is a defense-in-depth ceiling on the aggregate. 64 MiB is orders of
+/// magnitude above any realistic index (real ones are KB to low MB) — hitting
+/// it means something is wrong, so failing the write loudly is correct.
+const MAX_INDEX_BYTES: usize = 64 * 1024 * 1024;
+
 /// The cached, probed view of every known MCP server.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Index {
@@ -92,6 +100,14 @@ impl Index {
         }
         let tmp = path.with_extension("json.tmp");
         let bytes = serde_json::to_vec_pretty(self)?;
+        if bytes.len() > MAX_INDEX_BYTES {
+            anyhow::bail!(
+                "refusing to write index.json: serialized size {} bytes exceeds the {} byte ceiling. \
+                 This usually means an oversized or runaway seed; trim entries or remove a server.",
+                bytes.len(),
+                MAX_INDEX_BYTES,
+            );
+        }
         std::fs::write(&tmp, bytes)?;
         std::fs::rename(&tmp, path)
             .with_context(|| format!("renaming temp index into {}", path.display()))?;

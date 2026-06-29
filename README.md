@@ -62,7 +62,7 @@ The agent's discovery cost collapses from "N schemas × M tools each" to **one t
 - **A two-layer knowledge store.** Manifests are your canon. Learned notes accrete from agent observations across sessions.
 - **A bootstrapping tool for hosted MCP servers.** Fetches public docs, lets the agent synthesize a playbook, then commits it via a propose/commit gate so you've reviewed before it lands on disk.
 - **Concurrent-safe.** Multiple clients (Claude Code + Codex side-by-side) writing simultaneously are serialized via a file lock; manifest writes are atomic.
-- **Security-conscious.** SSRF guards on outbound fetch, path-traversal validation on every `server` parameter, and single-use content-fingerprinted tokens gating every destructive write (`librarian_manifest_write`, `librarian_manifest_restore`, `librarian_seed_batch`, `librarian_seed_remove`). The fast-path `librarian_seed_playbook` is ungated for first-install adds but refuses to overwrite an existing entry unless you explicitly pass `overwrite=true`.
+- **Security-conscious.** SSRF guards on outbound fetch (connection-time IP validation on every hop, not just the first), path-traversal validation on every `server` parameter, and single-use tokens gating every destructive write. The content-bearing writes (`librarian_manifest_write`, `librarian_seed_batch`, and `librarian_seed_playbook` overwrites) additionally pin the exact content by fingerprint; `librarian_manifest_restore` and `librarian_seed_remove` are bound to the server + action. Adding a *new* `librarian_seed_playbook` entry is a one-shot fast path; *overwriting* an existing one goes through the same propose/commit gate.
 - **Rust, no runtime dependencies.** Single statically-linked binary. ~12 MB.
 - **Designed for the worst-case AI.** Gates are *code rules*, not social rules in tool descriptions. An agent that ignores instructions still can't write a manifest without producing a structured preview first.
 - **Diagnostics-as-content.** Tool failures return `Ok` MCP content with a leading `Error: …` prefix, not JSON-RPC `error` envelopes. Agents see schema violations, expired tokens, and validation failures inline in the same response stream they read on success — no client transport quirk can hide them from the model.
@@ -70,7 +70,7 @@ The agent's discovery cost collapses from "N schemas × M tools each" to **one t
 ## What this is not
 
 - **It is NOT a proxy** for your MCP servers. It does not invoke their tools. It only describes them.
-- **It does NOT manage credentials.** API keys / tokens live in your MCP client config (`.claude.json` / `claude_desktop_config.json`) and get passed to spawned servers as env vars. The librarian never reads them.
+- **It does NOT manage credentials.** API keys / tokens live in your MCP client config (`.claude.json` / `claude_desktop_config.json`). When the librarian probes a stdio server it reads that server's `env` block only to forward it to the spawned child process (exactly as your MCP client would); it never stores, logs, or returns credential values.
 - **It is NOT a multi-user or cloud service.** Single-user, local-only. Your data stays on your disk.
 - **It is NOT a replacement** for the MCP servers it indexes. It's a directory/playbook layer on top.
 - **It is NOT a generic notes system.** Notes are scoped to (server, tool, kind, basis). It's a knowledge graph for MCP behavior, not for arbitrary prose.
@@ -82,20 +82,22 @@ The agent's discovery cost collapses from "N schemas × M tools each" to **one t
 Three pieces of state live on disk, all human-readable, all editable:
 
 ```
-%APPDATA%\netviper\mcp-librarian\            (Windows; macOS/Linux follow `directories` crate)
+%APPDATA%\netviper\mcp-librarian\            (Windows roaming; macOS/Linux follow `directories` crate)
 ├── config/
 │   ├── manifests/
 │   │   ├── slack.toml               # your canon for slack
 │   │   ├── slack.toml.bak           # auto-backup written before every commit
 │   │   └── playwright.toml          # …
 │   └── .librarian.lock              # advisory file lock for cross-process writes
-├── cache/
-│   ├── index.json                   # probed tool names + descriptions (the index)
-│   └── docs/<hash>.json             # cached responses from librarian_fetch_docs
 └── data/
     └── learned/
         ├── slack.jsonl              # agent-appended observations, append-only
         └── playwright.jsonl
+
+%LOCALAPPDATA%\netviper\mcp-librarian\       (Windows local; the cache is non-roaming)
+└── cache/
+    ├── index.json                   # probed tool names + descriptions (the index)
+    └── docs/<hash>.json             # cached responses from librarian_fetch_docs
 ```
 
 **Rendering precedence** when an agent calls `librarian_help("slack")`:
@@ -248,7 +250,7 @@ That works — they each spawn their own librarian process sharing the same data
 | `librarian_help` | Playbook for one server. No `topic` = overview; with `topic` = drill-down. `server="librarian"` returns the librarian's own playbook. `topic="manifest_schema"` returns the TOML reference. |
 | `librarian_search` | Intent-aware fuzzy match across every known tool's name, description, and manifest `tool_aliases` phrases. Stop-word filtered. |
 | `librarian_note` | Agent appends an observation about a server's behavior. Soft-dedup at write time on (server, tool, kind, normalized claim). `allow_duplicate=true` to bypass. |
-| `librarian_seed_playbook` | Bootstrap a single hosted/cloud server entry from the tool list the agent already sees in its deferred-tools reminder. No approval gate — for fast incremental "I just noticed a new server" additions. |
+| `librarian_seed_playbook` | Bootstrap a single hosted/cloud server entry from the tool list the agent already sees in its deferred-tools reminder. Adding a NEW entry is an ungated one-shot — for fast incremental "I just noticed a new server" additions. OVERWRITING an existing entry (`overwrite=true`) goes through the propose/commit token gate, so a real probed/curated entry can't be silently clobbered. |
 | `librarian_seed_batch` | Bulk-seed many hosted servers in one approved transaction. Two-step propose/commit gate (one user approval covers the whole batch). The recommended path for first-install onboarding when there are 5+ hosted MCPs to register. |
 | `librarian_seed_remove` | Remove a server entry from the index. For cleaning up stale seeds (servers no longer connected). Two-step propose/commit gate. Manifests and learned notes are not deleted; warning surfaces if removal won't be permanent. |
 | `librarian_refresh` | Reprobe local stdio servers. Flags notes whose schemas drifted. |
@@ -379,7 +381,7 @@ Resolved via the [`directories`](https://docs.rs/directories) crate. On Windows:
 - Doc cache: `%LOCALAPPDATA%\netviper\mcp-librarian\cache\docs\<hash>.json`
 - Manifests: `%APPDATA%\netviper\mcp-librarian\config\manifests\<server>.toml` (+ `.bak`)
 - Lock: `%APPDATA%\netviper\mcp-librarian\config\.librarian.lock`
-- Learned notes: `%LOCALAPPDATA%\netviper\mcp-librarian\data\learned\<server>.jsonl`
+- Learned notes: `%APPDATA%\netviper\mcp-librarian\data\learned\<server>.jsonl`
 
 macOS/Linux paths follow the same crate's conventions. They compile and the release matrix workflow exercises them on every tag, but I'm on Windows day-to-day — corner cases on those platforms are best caught by reports + PRs.
 
@@ -412,7 +414,7 @@ The non-`serve` subcommands are for local inspection — quick "what does this l
 - `data/learned/<server>.jsonl` — agent-appended observations. Prose claims plus `kind` / `basis` metadata.
 - `cache/docs/<hash>.json` — cached responses from `librarian_fetch_docs` (7-day TTL).
 
-**What it doesn't store.** No API keys, tokens, or session credentials. Those live in your MCP client config (`.claude.json`, `claude_desktop_config.json`) and are passed to spawned servers as env vars; the librarian never reads them. Convention for `librarian_note` claims: prose, not literal arg blobs.
+**What it doesn't store.** No API keys, tokens, or session credentials. Those live in your MCP client config (`.claude.json`, `claude_desktop_config.json`). When probing a stdio server the librarian forwards that server's `env` block to the child process it spawns, but never stores, logs, or returns the values. Convention for `librarian_note` claims: prose, not literal arg blobs.
 
 **Why no app-level encryption.** The data above isn't sensitive (playbooks, references to env-var *names*, public-docs cache). Any reversible scheme would need its key on disk next to the file — that's obfuscation, not security. If you want at-rest protection, BitLocker / FileVault / dm-crypt at the volume level is the right tool, not application-level.
 
@@ -426,7 +428,7 @@ The non-`serve` subcommands are for local inspection — quick "what does this l
 - IP literals in loopback / private / link-local / multicast / CGNAT / IPv6 unique-local / IPv6 link-local ranges, plus IPv4-mapped equivalents
 - `localhost` and aliases as hostnames
 - Hostnames that DNS-resolve into any of the above
-- Redirects to any of the above (re-validated per hop, max 5 hops)
+- Redirects to any of the above — every hop is re-validated at connection time (the client connects only to IPs that passed the block-list, so a redirect to a hostname that resolves into a private range is blocked, not just literal-IP redirects), max 5 hops
 
 Response bodies are capped at 5 MiB to prevent OOM.
 
@@ -434,7 +436,7 @@ Response bodies are capped at 5 MiB to prevent OOM.
 
 **Server-name validation.** The `server` argument in every tool that takes one is validated to `[A-Za-z0-9_.-]+` with no leading dot, preventing path-traversal writes via names like `../../foo`.
 
-**Propose/commit gates.** Every write tool (`librarian_manifest_write`, `librarian_manifest_restore`, `librarian_seed_batch`, `librarian_seed_remove`) requires a two-step dance: the propose call returns a structured preview + a single-use token; the commit call must include that token AND the same content (fingerprinted). Tokens expire in 5 minutes. This is the code-rule that prevents an agent from auto-committing destructive changes — designed for the worst-case AI, not the best.
+**Propose/commit gates.** Every destructive write requires a two-step dance: the propose call returns a structured preview + a single-use token; the commit call must include that token. `librarian_manifest_write`, `librarian_seed_batch`, and `librarian_seed_playbook` *overwrites* also pin the exact content by fingerprint, so committing anything different than what was previewed rejects. `librarian_manifest_restore` and `librarian_seed_remove` carry no content to fingerprint (their effect is defined by current on-disk state), so they bind to the server name + action instead. Tokens expire in 5 minutes and are single-use. This is the code-rule that prevents an agent from auto-committing destructive changes — designed for the worst-case AI, not the best.
 
 ## Known limitations
 

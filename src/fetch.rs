@@ -1,8 +1,9 @@
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
+use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -175,10 +176,11 @@ pub fn check_url_sync(url: &reqwest::Url) -> Result<()> {
 /// range. Catches the case where a hostname like `localtest.me` resolves to
 /// `127.0.0.1`, or an attacker-controlled domain points at a private IP.
 ///
-/// Limitation: this is one-shot. The actual reqwest fetch resolves again,
-/// so a DNS-rebinding attacker could in theory return a public IP here and
-/// a private IP for the real fetch. Mitigated for the most common cases by
-/// the redirect-policy re-validation and is documented in the README.
+/// This is an early, friendly-diagnostic check on the *initial* URL. It is NOT
+/// the security boundary on its own: the actual connection (and every redirect
+/// hop) is guarded at connect time by `GuardedResolver`, which reqwest uses as
+/// its sole resolver, so the IPs validated there are the exact IPs dialed —
+/// no separate re-resolve, no DNS-rebinding window.
 pub async fn resolve_and_check(url: &reqwest::Url) -> Result<()> {
     let host = url
         .host_str()
@@ -259,12 +261,91 @@ fn blocked_ip_reason(ip: &IpAddr) -> Option<&'static str> {
             if (segs[0] & 0xffc0) == 0xfe80 {
                 return Some("an IPv6 link-local address (fe80::/10)");
             }
-            // IPv4-mapped/translated — recursively check the embedded v4.
+            // IPv4-mapped (::ffff:a.b.c.d) — recursively check the embedded v4.
             if let Some(v4) = v6.to_ipv4_mapped() {
                 return blocked_ip_reason(&IpAddr::V4(v4));
             }
+            // NAT64 well-known prefix 64:ff9b::/96 — the low 32 bits hold an
+            // embedded v4. Without this, a name resolving to a NAT64 address
+            // pointing at an internal v4 would slip past the v4 block-list.
+            if segs[0] == 0x0064
+                && segs[1] == 0xff9b
+                && segs[2] == 0
+                && segs[3] == 0
+                && segs[4] == 0
+                && segs[5] == 0
+            {
+                let v4 = embedded_v4(segs[6], segs[7]);
+                return blocked_ip_reason(&IpAddr::V4(v4))
+                    .or(Some("an IPv6 NAT64 embedded address (64:ff9b::/96)"));
+            }
+            // 6to4 2002::/16 — the embedded v4 is in segs[1..3].
+            if segs[0] == 0x2002 {
+                let v4 = embedded_v4(segs[1], segs[2]);
+                return blocked_ip_reason(&IpAddr::V4(v4))
+                    .or(Some("an IPv6 6to4 embedded address (2002::/16)"));
+            }
+            // Deprecated IPv4-compatible ::a.b.c.d — high 96 bits zero, low 32
+            // hold a v4. (`::` and `::1` are already handled by the unspecified
+            // and loopback checks at the top, so they never reach here.)
+            if segs[0..6].iter().all(|&s| s == 0) {
+                let v4 = embedded_v4(segs[6], segs[7]);
+                return blocked_ip_reason(&IpAddr::V4(v4))
+                    .or(Some("an IPv6 IPv4-compatible embedded address (::a.b.c.d)"));
+            }
             None
         }
+    }
+}
+
+/// Reassemble an IPv4 address from two IPv6 segments (the embedded-v4 forms
+/// above all carry the v4 in the final two 16-bit groups).
+fn embedded_v4(hi: u16, lo: u16) -> Ipv4Addr {
+    Ipv4Addr::new(
+        (hi >> 8) as u8,
+        (hi & 0xff) as u8,
+        (lo >> 8) as u8,
+        (lo & 0xff) as u8,
+    )
+}
+
+/// reqwest DNS resolver that re-runs the SSRF block-list against every IP the
+/// HTTP client is about to connect to — for the initial request AND every
+/// redirect hop. reqwest connects to exactly the addresses this resolver
+/// returns and performs no separate system resolve, so there is no
+/// resolve-then-connect (DNS-rebinding) window: the IPs validated here are the
+/// IPs that get dialed.
+///
+/// IP-literal hosts bypass this resolver (reqwest dials literals directly), so
+/// the literal-IP screen still lives in `check_url_sync`, which the redirect
+/// policy applies to every hop.
+#[derive(Debug, Default, Clone)]
+struct GuardedResolver;
+
+impl Resolve for GuardedResolver {
+    fn resolve(&self, name: Name) -> Resolving {
+        Box::pin(async move {
+            let host = name.as_str().to_owned();
+            // Port 0: reqwest overrides it with the URL's port after resolution.
+            let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 0))
+                .await
+                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?
+                .collect();
+            if addrs.is_empty() {
+                return Err(format!("SSRF guard: host `{host}` resolved to no addresses").into());
+            }
+            for addr in &addrs {
+                if let Some(reason) = blocked_ip_reason(&addr.ip()) {
+                    return Err(format!(
+                        "SSRF guard: refusing to connect to `{host}` — it resolves to {} which is {reason}",
+                        addr.ip()
+                    )
+                    .into());
+                }
+            }
+            let iter: Addrs = Box::new(addrs.into_iter());
+            Ok(iter)
+        })
     }
 }
 
@@ -420,11 +501,17 @@ pub async fn fetch_docs(
     //    have blocked the prior write) don't pay the resolve cost.
     resolve_and_check(&parsed).await?;
 
-    // 4. HTTP fetch. Redirect policy re-validates each hop's URL so a 30x
-    //    bouncing to localhost/private is blocked before reqwest follows it.
+    // 4. HTTP fetch. Two layers guard the connection against SSRF:
+    //    - A custom DNS resolver (`GuardedResolver`) validates every IP the
+    //      client connects to — initial host AND every redirect hop — and
+    //      reqwest dials exactly those IPs, closing the DNS-rebinding window
+    //      (no separate system re-resolve between check and connect).
+    //    - The redirect policy re-screens each hop's URL (scheme + literal IP),
+    //      which the resolver can't see because literal-IP hosts skip DNS.
     let client = reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
+        .dns_resolver(Arc::new(GuardedResolver))
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
             if attempt.previous().len() >= 5 {
                 return attempt.error("too many redirects (max 5)");
@@ -578,6 +665,34 @@ mod tests {
         assert!(check_url_sync(&url("http://[::ffff:127.0.0.1]/")).is_err());
         // ::ffff:10.0.0.1 — IPv4-mapped IPv6 of private range
         assert!(check_url_sync(&url("http://[::ffff:10.0.0.1]/")).is_err());
+    }
+
+    #[test]
+    fn check_url_sync_rejects_ipv6_embedded_v4_forms() {
+        // NAT64 64:ff9b::/96 wrapping a loopback / private / metadata v4.
+        assert!(check_url_sync(&url("http://[64:ff9b::7f00:1]/")).is_err()); // 127.0.0.1
+        assert!(check_url_sync(&url("http://[64:ff9b::a00:1]/")).is_err()); // 10.0.0.1
+        assert!(check_url_sync(&url("http://[64:ff9b::a9fe:a9fe]/")).is_err()); // 169.254.169.254
+        // 6to4 2002::/16 wrapping a private v4 (2002:0a00:0001:: => 10.0.0.1).
+        assert!(check_url_sync(&url("http://[2002:a00:1::]/")).is_err());
+        // Deprecated IPv4-compatible ::a.b.c.d wrapping loopback / private.
+        assert!(check_url_sync(&url("http://[::7f00:1]/")).is_err()); // ::127.0.0.1
+        assert!(check_url_sync(&url("http://[::c0a8:1]/")).is_err()); // ::192.168.0.1
+    }
+
+    #[test]
+    fn blocked_ip_reason_blocks_ipv6_embedded_v4() {
+        use std::net::Ipv6Addr;
+        // NAT64 → 169.254.169.254 (metadata) must be blocked.
+        let nat64 = Ipv6Addr::from_str("64:ff9b::a9fe:a9fe").unwrap();
+        assert!(blocked_ip_reason(&IpAddr::V6(nat64)).is_some());
+        // A NAT64-wrapped *public* v4 (8.8.8.8 => 0808:0808) is still flagged
+        // by the prefix rule — these forms are not expected for real doc hosts.
+        let nat64_pub = Ipv6Addr::from_str("64:ff9b::808:808").unwrap();
+        assert!(blocked_ip_reason(&IpAddr::V6(nat64_pub)).is_some());
+        // Ordinary global-unicast IPv6 is still allowed.
+        let pub6 = Ipv6Addr::from_str("2606:4700:4700::1111").unwrap();
+        assert!(blocked_ip_reason(&IpAddr::V6(pub6)).is_none());
     }
 
     #[test]
