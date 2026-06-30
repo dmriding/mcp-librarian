@@ -1,11 +1,11 @@
 /docs
 /target
-/scripts
 /.claude
 
 # IDE
 .idea/
 .vscode/
+.fastembed_cache
 
 # OS junk
 .DS_Store
