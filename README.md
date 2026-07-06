@@ -6,6 +6,10 @@
 [![crates.io](https://img.shields.io/crates/v/mcp-librarian.svg)](https://crates.io/crates/mcp-librarian)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#licenses--contributing)
 
+![The agent checks the librarian's Notion playbook before touching the API, and gets the data-source-vs-database gotcha for free.](assets/librarian-demo.gif)
+
+*The agent checks the librarian's Notion playbook first — and gets the data-source-vs-database gotcha before it fumbles an ID.*
+
 I built this for me; I run it daily with Claude Code and Codex. Patches welcome — feature requests without patches will be politely declined.
 
 ---
