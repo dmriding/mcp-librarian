@@ -2,6 +2,10 @@
 
 > An MCP server that indexes your other MCP servers and emits playbooks on demand.
 
+[![CI](https://github.com/dmriding/mcp-librarian/actions/workflows/ci.yml/badge.svg)](https://github.com/dmriding/mcp-librarian/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/mcp-librarian.svg)](https://crates.io/crates/mcp-librarian)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#licenses--contributing)
+
 I built this for me; I run it daily with Claude Code and Codex. Patches welcome — feature requests without patches will be politely declined.
 
 ---
@@ -138,19 +142,22 @@ This is **the entire value proposition**. Everything else (manifest authoring, n
 
 ## Install
 
-```powershell
-# from source
-cargo build --release
-.\target\release\mcp-librarian.exe --help
+### From crates.io (recommended)
+
+```bash
+cargo install mcp-librarian
 ```
 
-Or install globally:
+Drops `mcp-librarian` into `~/.cargo/bin` (on your `PATH`). Works on Windows, macOS, and Linux.
+
+### From source
 
 ```powershell
-cargo install --path .
+cargo build --release        # binary at target/release/mcp-librarian(.exe)
+cargo install --path .       # …or install it globally from the checkout
 ```
 
-The result is one self-contained ~12 MB binary. No runtime dependencies, no Node, no Python.
+Either way you get one self-contained ~12 MB binary. No runtime dependencies, no Node, no Python.
 
 ### Tested platforms
 
