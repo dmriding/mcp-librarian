@@ -181,12 +181,15 @@ pub enum NoteKind {
     Example,
 }
 
+// Docs stay on the type, not the variants: schemars renders a doc-commented
+// variant as a `oneOf` of `const` strings, which strict validators reject.
+/// Evidence strength. `observed` = witnessed it, ran the call and got this back
+/// (strong). `inferred` = believed but not verified (weaker; rendered in its own
+/// section).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum NoteBasis {
-    /// I just witnessed this — ran a call, got this back. Strong evidence.
     Observed,
-    /// I think this is probably true, but didn't verify. Weaker; rendered separately.
     Inferred,
 }
 

@@ -3,10 +3,12 @@ use chrono::{DateTime, Utc};
 use rmcp::ErrorData;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{ServerCapabilities, ServerInfo};
+use rmcp::model::{JsonObject, ServerCapabilities, ServerInfo};
 use rmcp::service::RequestContext;
 use rmcp::{RoleServer, ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
+use schemars::generate::SchemaSettings;
+use schemars::transform::AddNullable;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
@@ -110,6 +112,12 @@ impl LibrarianServer {
             fetch_state: FetchState::default(),
             tool_router: Self::tool_router(),
         }
+    }
+
+    /// Every tool exactly as advertised over `tools/list`. Exists for the
+    /// `advertised_schemas_*` guards; no `src/` caller.
+    pub fn advertised_tools(&self) -> Vec<rmcp::model::Tool> {
+        self.tool_router.list_all()
     }
 
     fn issue_token(&self, pending: PendingWrite) -> String {
@@ -252,6 +260,35 @@ fn check_toml_nesting_depth(s: &str) -> Result<()> {
         i += 1;
     }
     Ok(())
+}
+
+/// Advertised `inputSchema` with subschemas inlined.
+///
+/// WHY: draft-07 `$ref`/`definitions` survive schemars but not strict provider
+/// validators, and the rejection kills the whole chat request, not the one tool
+/// (MoonshotAI/kimi-cli#1595). `transforms` mirrors rmcp's generator; dropping it
+/// changes how every `Option` field renders.
+///
+/// Every `#[tool]` must pass `input_schema = flat_schema::<ItsParams>()` — by rule,
+/// not by test: the guards fire only once a forgotten call emits a `$ref`.
+fn flat_schema<T: JsonSchema>() -> Arc<JsonObject> {
+    let mut settings = SchemaSettings::draft07();
+    settings.inline_subschemas = true;
+    settings.transforms = vec![Box::new(AddNullable::default())];
+    let schema = settings.into_generator().into_root_schema_for::<T>();
+    let serde_json::Value::Object(mut map) =
+        serde_json::to_value(schema).expect("schema serializes")
+    else {
+        panic!(
+            "root schema for {} is not an object",
+            std::any::type_name::<T>()
+        )
+    };
+    // Root only: OpenAI strict mode wants the key even when empty; nested map-typed
+    // properties state their constraint in `additionalProperties`.
+    map.entry("properties")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    Arc::new(map)
 }
 
 // =================== Parameter / response types ===================
@@ -436,6 +473,7 @@ pub struct FetchDocsParams {
 impl LibrarianServer {
     #[tool(
         name = "librarian_list",
+        input_schema = flat_schema::<ListParams>(),
         description = "Return a directory of every known MCP server, grouped by category. \
                        Add `category` to filter. One call, agent knows the landscape."
     )]
@@ -446,6 +484,7 @@ impl LibrarianServer {
 
     #[tool(
         name = "librarian_onboarding",
+        input_schema = flat_schema::<OnboardingParams>(),
         description = "Return a step-by-step bootstrap prompt for indexing every MCP server connected to this client. \
                        Call this once on first install: it tells the agent how to combine \
                        `librarian_refresh` (auto-discovers local stdio servers) with `librarian_seed_playbook` \
@@ -461,6 +500,7 @@ impl LibrarianServer {
 
     #[tool(
         name = "librarian_help",
+        input_schema = flat_schema::<HelpParams>(),
         description = "Get a playbook for one MCP server. No topic = overview (categories, workflows, gotchas). \
                        With topic = focused drill-down. Use `server=\"librarian\"` for the librarian itself."
     )]
@@ -471,6 +511,7 @@ impl LibrarianServer {
 
     #[tool(
         name = "librarian_search",
+        input_schema = flat_schema::<SearchParams>(),
         description = "Fuzzy-search across all known tool names and descriptions. \
                        Returns ranked (server, tool, summary) candidates — cheap to scan before paying for a full schema load."
     )]
@@ -481,6 +522,7 @@ impl LibrarianServer {
 
     #[tool(
         name = "librarian_note",
+        input_schema = flat_schema::<NoteParams>(),
         description = "Append a learned observation about a server's behavior. \
                        Prefer `kind=\"workflow\"` (highest value) and `basis=\"observed\"` (witnessed, not speculated). \
                        This is how the librarian gets smarter with use."
@@ -492,6 +534,7 @@ impl LibrarianServer {
 
     #[tool(
         name = "librarian_seed_playbook",
+        input_schema = flat_schema::<SeedParams>(),
         description = "Bootstrap a single server entry from the tool list you already see in your context. \
                        Use this for remote/cloud servers the librarian can't probe directly. \
                        Adding a NEW entry (no existing server of that name) is a one-shot fast path. \
@@ -510,6 +553,7 @@ impl LibrarianServer {
 
     #[tool(
         name = "librarian_seed_remove",
+        input_schema = flat_schema::<SeedRemoveParams>(),
         description = "Remove a server entry from the librarian index. For cleaning up stale \
                        seeds (servers no longer connected to the client). \
                        TWO-STEP REQUIRED: \
@@ -532,6 +576,7 @@ impl LibrarianServer {
 
     #[tool(
         name = "librarian_seed_batch",
+        input_schema = flat_schema::<SeedBatchParams>(),
         description = "Bulk-seed many hosted/cloud server entries in one approved transaction. \
                        Designed for first-install onboarding where the agent has identified every \
                        hosted MCP server visible in its deferred-tools reminder. \
@@ -554,6 +599,7 @@ impl LibrarianServer {
 
     #[tool(
         name = "librarian_refresh",
+        input_schema = flat_schema::<RefreshParams>(),
         description = "Reprobe one or all probeable servers. Updates schemas and flags learned notes whose underlying tool shape drifted. \
                        Cache is read-only on the hot path; refresh is always explicit."
     )]
@@ -565,6 +611,7 @@ impl LibrarianServer {
 
     #[tool(
         name = "librarian_manifest_write",
+        input_schema = flat_schema::<ManifestWriteParams>(),
         description = "Write or replace a server's manifest (the authoritative curated playbook). \
                        PASS THE MANIFEST AS `manifest_toml` (a single TOML string) — NOT as nested JSON. \
                        Nested JSON with multi-line workflow/topic bodies causes many MCP clients to hang. \
@@ -588,6 +635,7 @@ impl LibrarianServer {
 
     #[tool(
         name = "librarian_manifest_diff",
+        input_schema = flat_schema::<ManifestDiffParams>(),
         description = "Show what changed between a server's current manifest and the auto-backup (the prior version). \
                        Read-only — no commit gate. Output enumerates ADDED / REMOVED / CHANGED items per section \
                        (meta, tool_categories, workflows, topics, gotchas). Use this to inspect what librarian_manifest_write \
@@ -603,6 +651,7 @@ impl LibrarianServer {
 
     #[tool(
         name = "librarian_manifest_restore",
+        input_schema = flat_schema::<ManifestRestoreParams>(),
         description = "Swap a server's current manifest with its auto-backup. Reversible: calling restore twice in a row \
                        leaves you where you started. \
                        TWO-STEP REQUIRED: \
@@ -621,6 +670,7 @@ impl LibrarianServer {
 
     #[tool(
         name = "librarian_fetch_docs",
+        input_schema = flat_schema::<FetchDocsParams>(),
         description = "Fetch a public documentation URL, extract readable text, and return it for use \
                        when synthesizing a manifest. Built for bootstrapping playbooks for HOSTED MCP \
                        servers (Notion, Figma, Slack, HubSpot, Context7, etc.) where the librarian \

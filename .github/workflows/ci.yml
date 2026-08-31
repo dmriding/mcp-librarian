@@ -16,8 +16,15 @@ permissions:
 
 jobs:
   test:
-    name: test (windows)
-    runs-on: windows-latest
+    # Matrix mirrors release.yml. Windows is the primary target, but the stdio
+    # guard test spawns the real binary, and process behaviour is where that
+    # drifts — catching it on a PR beats catching it on a release tag.
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.96.0
