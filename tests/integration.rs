@@ -1706,7 +1706,8 @@ fn advertised_schemas_carry_no_refs() {
 
 /// Strict provider validators also want a concrete `type` on the root object and
 /// on every property — an `anyOf`-only property (what `Option<Manifest>` used to
-/// render as) is rejected the same way a `$ref` is.
+/// render as) is rejected the same way a `$ref` is. A `properties` key is
+/// required too, even on a tool that takes no arguments (OpenAI strict mode).
 #[test]
 fn advertised_schemas_type_every_property() {
     let (_tmp, paths) = temp_paths();
@@ -1722,8 +1723,10 @@ fn advertised_schemas_type_every_property() {
         let props = tool
             .input_schema
             .get("properties")
-            .and_then(|p| p.as_object());
-        for (name, prop) in props.into_iter().flatten() {
+            .unwrap_or_else(|| panic!("{}: root schema has no `properties`", tool.name))
+            .as_object()
+            .unwrap_or_else(|| panic!("{}: `properties` is not an object", tool.name));
+        for (name, prop) in props {
             assert!(
                 prop.get("type").is_some(),
                 "{}: property `{name}` has no `type`: {prop}",

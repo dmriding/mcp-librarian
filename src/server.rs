@@ -281,13 +281,20 @@ fn flat_schema<T: JsonSchema>() -> Arc<JsonObject> {
     settings.inline_subschemas = true;
     settings.transforms = vec![Box::new(AddNullable::default())];
     let schema = settings.into_generator().into_root_schema_for::<T>();
-    match serde_json::to_value(schema).expect("schema serializes") {
-        serde_json::Value::Object(map) => Arc::new(map),
+    let mut map = match serde_json::to_value(schema).expect("schema serializes") {
+        serde_json::Value::Object(map) => map,
         other => panic!(
             "schema for {} is not a JSON object: {other:?}",
             std::any::type_name::<T>()
         ),
-    }
+    };
+    // A no-argument tool renders as a bare `{"type": "object"}`; OpenAI strict
+    // function calling and other provider subsets require the key to be present.
+    // Root only — nested map-typed properties carry their constraint in
+    // `additionalProperties`, where an empty `properties` would be noise.
+    map.entry("properties")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    Arc::new(map)
 }
 
 // =================== Parameter / response types ===================
