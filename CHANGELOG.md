@@ -4,6 +4,9 @@ All notable changes to this project will be documented here. Format follows [Kee
 
 ## [Unreleased]
 
+### Fixed
+- **Advertised tool schemas are self-contained — no draft-07 `$ref`/`definitions`.** schemars' default generator hoisted named types (`NoteBasis`, `NoteKind`, `Manifest`, `SeedTool`, `SeedParams`) into a root `definitions` block and pointed at them with `$ref`. MCP clients that forward `inputSchema` verbatim into an LLM provider's `tools` array hit provider-side validators that only resolve `#/$defs`-style refs, and the rejection lands on the *whole chat request*, not the one tool (Moonshot reports it as "detected infinite recursion"). Every tool now advertises an inlined schema. `NoteBasis` also renders as a plain `{"type": "string", "enum": [...]}` instead of a `oneOf` of `const` strings, and `manifest` on `librarian_manifest_write` carries an explicit `type` instead of a typeless `anyOf`. Argument shapes are otherwise unchanged — no client-visible break. See `docs/bugs.md`.
+
 ## [0.2.2] - 2026-06-29
 
 Pre-public hardening pass. A full adversarial review surfaced two reachable SSRF gaps, a single-call denial-of-service, an ungated destructive write, and a red dependency gate; all are closed below, plus the should-fix and documentation-accuracy items found alongside them.

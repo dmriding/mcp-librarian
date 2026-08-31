@@ -7,6 +7,7 @@ use mcp_librarian::index::{
 use mcp_librarian::playbook::{
     self, Manifest, ManifestCategory, ManifestMeta, ManifestTopic, ManifestWorkflow, ToolAlias,
 };
+use mcp_librarian::server::LibrarianServer;
 use serde_json::json;
 use std::collections::BTreeMap;
 use tempfile::TempDir;
@@ -1656,4 +1657,135 @@ fn seeded_server_renders_overview() {
     assert!(out.contains("claude.ai_Notion"));
     assert!(out.contains("Tool Categories"));
     assert!(out.contains("notion-search"));
+}
+
+// --- advertised tool schemas (docs/bugs.md: draft-07 $ref portability) ---
+
+/// Collect the JSON pointer of every occurrence of `needles` in a schema.
+fn find_keys(node: &serde_json::Value, needles: &[&str], at: &str, hits: &mut Vec<String>) {
+    match node {
+        serde_json::Value::Object(map) => {
+            for (k, v) in map {
+                if needles.contains(&k.as_str()) {
+                    hits.push(format!("{at}/{k}"));
+                }
+                find_keys(v, needles, &format!("{at}/{k}"), hits);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for (i, v) in items.iter().enumerate() {
+                find_keys(v, needles, &format!("{at}/{i}"), hits);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// An MCP client that forwards `inputSchema` verbatim into an LLM provider's
+/// `tools` array gets the WHOLE chat request rejected when a draft-07
+/// `$ref`/`definitions` pair rides along — strict provider subsets only resolve
+/// `#/$defs`-style refs. Advertised schemas must therefore be self-contained.
+#[test]
+fn advertised_schemas_carry_no_refs() {
+    let (_tmp, paths) = temp_paths();
+    let server = LibrarianServer::new(paths);
+    let tools = server.advertised_tools();
+    assert_eq!(tools.len(), 13, "tool count changed — recheck this guard");
+
+    for tool in &tools {
+        let schema = serde_json::Value::Object((*tool.input_schema).clone());
+        let mut hits = Vec::new();
+        find_keys(&schema, &["$ref", "definitions", "$defs"], "", &mut hits);
+        assert!(
+            hits.is_empty(),
+            "{}: schema is not self-contained: {hits:?}",
+            tool.name
+        );
+    }
+}
+
+/// Strict provider validators also want a concrete `type` on the root object and
+/// on every property — an `anyOf`-only property (what `Option<Manifest>` used to
+/// render as) is rejected the same way a `$ref` is.
+#[test]
+fn advertised_schemas_type_every_property() {
+    let (_tmp, paths) = temp_paths();
+    let server = LibrarianServer::new(paths);
+
+    for tool in &server.advertised_tools() {
+        assert_eq!(
+            tool.input_schema.get("type").and_then(|t| t.as_str()),
+            Some("object"),
+            "{}: root schema is not type=object",
+            tool.name
+        );
+        let props = tool
+            .input_schema
+            .get("properties")
+            .and_then(|p| p.as_object());
+        for (name, prop) in props.into_iter().flatten() {
+            assert!(
+                prop.get("type").is_some(),
+                "{}: property `{name}` has no `type`: {prop}",
+                tool.name
+            );
+        }
+    }
+}
+
+/// End-to-end: drive a real `mcp-librarian serve` over stdio and assert the
+/// tools/list frame that actually reaches a client is ref-free. The unit guards
+/// above assert on the router; this one asserts on the wire.
+#[tokio::test]
+async fn serve_wire_frame_is_ref_free() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_mcp-librarian"))
+        .arg("serve")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn mcp-librarian serve");
+
+    let mut stdin = child.stdin.take().expect("stdin");
+    let mut stdout = BufReader::new(child.stdout.take().expect("stdout")).lines();
+
+    for frame in [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"guard","version":"0"}}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+    ] {
+        stdin.write_all(frame.as_bytes()).await.unwrap();
+        stdin.write_all(b"\n").await.unwrap();
+    }
+    stdin.flush().await.unwrap();
+
+    let read = async {
+        loop {
+            let line = stdout
+                .next_line()
+                .await
+                .expect("read frame")
+                .expect("server closed stdout before answering tools/list");
+            let frame: serde_json::Value = serde_json::from_str(&line).expect("frame is JSON");
+            if frame.get("id").and_then(|v| v.as_u64()) == Some(2) {
+                return line;
+            }
+        }
+    };
+    let line = tokio::time::timeout(std::time::Duration::from_secs(30), read)
+        .await
+        .expect("timed out waiting for tools/list");
+
+    drop(stdin);
+    let _ = child.kill().await;
+
+    let frame: serde_json::Value = serde_json::from_str(&line).unwrap();
+    let tools = frame["result"]["tools"].as_array().expect("tools array");
+    assert_eq!(tools.len(), 13);
+
+    let mut hits = Vec::new();
+    find_keys(&frame, &["$ref", "definitions", "$defs"], "", &mut hits);
+    assert!(hits.is_empty(), "tools/list frame carries refs: {hits:?}");
 }
