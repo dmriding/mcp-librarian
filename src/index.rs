@@ -181,11 +181,8 @@ pub enum NoteKind {
     Example,
 }
 
-// Semantics live on the type, not the variants: schemars renders a
-// doc-commented variant as a `oneOf` of `const` strings, which strict
-// provider-side schema validators reject. Documented here the enum keeps the
-// portable `{"type": "string", "enum": [...]}` shape, and the prose still
-// reaches the agent as the property description.
+// Docs stay on the type, not the variants: schemars renders a doc-commented
+// variant as a `oneOf` of `const` strings, which strict validators reject.
 /// Evidence strength. `observed` = witnessed it, ran the call and got this back
 /// (strong). `inferred` = believed but not verified (weaker; rendered in its own
 /// section).

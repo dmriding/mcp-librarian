@@ -114,8 +114,8 @@ impl LibrarianServer {
         }
     }
 
-    /// Every tool exactly as the server advertises it over `tools/list`.
-    /// Read-only introspection; the schema guard test asserts on this.
+    /// Every tool exactly as advertised over `tools/list`. Exists for the
+    /// `advertised_schemas_*` guards; no `src/` caller.
     pub fn advertised_tools(&self) -> Vec<rmcp::model::Tool> {
         self.tool_router.list_all()
     }
@@ -262,36 +262,30 @@ fn check_toml_nesting_depth(s: &str) -> Result<()> {
     Ok(())
 }
 
-/// Build a tool's advertised `inputSchema` with every subschema inlined.
+/// Advertised `inputSchema` with subschemas inlined.
 ///
-/// WHY: rmcp's default generator hoists named types (`NoteBasis`, `Manifest`,
-/// `SeedTool`, ...) into a root `definitions` block and points at them with
-/// draft-07 `$ref`. That is valid JSON Schema, but MCP clients that forward
-/// `inputSchema` verbatim into an LLM provider's `tools` array hit provider-side
-/// validators that only resolve `#/$defs`-style refs — and the rejection lands on
-/// the whole chat request, not the one tool (Moonshot reports it as "detected
-/// infinite recursion", MoonshotAI/kimi-cli#1595). A self-contained schema
-/// survives every validator. Settings otherwise mirror rmcp's `schema_for_type`
-/// so the wire shape is unchanged apart from the inlining.
+/// WHY: draft-07 `$ref`/`definitions` survive schemars but not strict provider
+/// validators, and the rejection kills the whole chat request, not the one tool
+/// (MoonshotAI/kimi-cli#1595). `transforms` mirrors rmcp's generator; dropping it
+/// changes how every `Option` field renders.
 ///
-/// Every `#[tool]` must pass `input_schema = flat_schema::<ItsParams>()`; the
-/// `advertised_schemas_carry_no_refs` guard test fails if one is forgotten.
+/// Every `#[tool]` must pass `input_schema = flat_schema::<ItsParams>()` — by rule,
+/// not by test: the guards fire only once a forgotten call emits a `$ref`.
 fn flat_schema<T: JsonSchema>() -> Arc<JsonObject> {
     let mut settings = SchemaSettings::draft07();
     settings.inline_subschemas = true;
     settings.transforms = vec![Box::new(AddNullable::default())];
     let schema = settings.into_generator().into_root_schema_for::<T>();
-    let mut map = match serde_json::to_value(schema).expect("schema serializes") {
-        serde_json::Value::Object(map) => map,
-        other => panic!(
-            "schema for {} is not a JSON object: {other:?}",
+    let serde_json::Value::Object(mut map) =
+        serde_json::to_value(schema).expect("schema serializes")
+    else {
+        panic!(
+            "root schema for {} is not an object",
             std::any::type_name::<T>()
-        ),
+        )
     };
-    // A no-argument tool renders as a bare `{"type": "object"}`; OpenAI strict
-    // function calling and other provider subsets require the key to be present.
-    // Root only — nested map-typed properties carry their constraint in
-    // `additionalProperties`, where an empty `properties` would be noise.
+    // Root only: OpenAI strict mode wants the key even when empty; nested map-typed
+    // properties state their constraint in `additionalProperties`.
     map.entry("properties")
         .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
     Arc::new(map)

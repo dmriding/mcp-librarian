@@ -1659,7 +1659,7 @@ fn seeded_server_renders_overview() {
     assert!(out.contains("notion-search"));
 }
 
-// --- advertised tool schemas (docs/bugs.md: draft-07 $ref portability) ---
+// --- advertised tool schemas: draft-07 $ref portability (kimi-cli#1595) ---
 
 /// Collect the JSON pointer of every occurrence of `needles` in a schema.
 fn find_keys(node: &serde_json::Value, needles: &[&str], at: &str, hits: &mut Vec<String>) {
@@ -1681,6 +1681,31 @@ fn find_keys(node: &serde_json::Value, needles: &[&str], at: &str, hits: &mut Ve
     }
 }
 
+/// Assert every schema at a `properties` / `items` / `additionalProperties`
+/// position carries a `type`, at any depth.
+fn assert_typed(node: &serde_json::Value, at: &str, tool: &str) {
+    let mut subs: Vec<(String, &serde_json::Value)> = Vec::new();
+    if let Some(props) = node.get("properties").and_then(|p| p.as_object()) {
+        subs.extend(
+            props
+                .iter()
+                .map(|(n, sub)| (format!("{at}/properties/{n}"), sub)),
+        );
+    }
+    for key in ["items", "additionalProperties"] {
+        if let Some(sub) = node.get(key).filter(|s| s.is_object()) {
+            subs.push((format!("{at}/{key}"), sub));
+        }
+    }
+    for (path, sub) in subs {
+        assert!(
+            sub.get("type").is_some(),
+            "{tool}: schema at {path} has no `type`: {sub}"
+        );
+        assert_typed(sub, &path, tool);
+    }
+}
+
 /// An MCP client that forwards `inputSchema` verbatim into an LLM provider's
 /// `tools` array gets the WHOLE chat request rejected when a draft-07
 /// `$ref`/`definitions` pair rides along — strict provider subsets only resolve
@@ -1690,10 +1715,21 @@ fn advertised_schemas_carry_no_refs() {
     let (_tmp, paths) = temp_paths();
     let server = LibrarianServer::new(paths);
     let tools = server.advertised_tools();
-    assert_eq!(tools.len(), 13, "tool count changed — recheck this guard");
+    assert!(!tools.is_empty());
 
+    let mut titles = std::collections::BTreeSet::new();
     for tool in &tools {
-        let schema = serde_json::Value::Object((*tool.input_schema).clone());
+        // Each params type belongs to exactly one tool, so a duplicate title means
+        // a `#[tool]` names another tool's type in `input_schema`.
+        let title = tool.input_schema.get("title").and_then(|t| t.as_str());
+        let title = title.unwrap_or_else(|| panic!("{}: schema has no `title`", tool.name));
+        assert!(
+            titles.insert(title.to_string()),
+            "{}: advertises `{title}`, already used by another tool",
+            tool.name
+        );
+
+        let schema = serde_json::to_value(tool).expect("tool serializes");
         let mut hits = Vec::new();
         find_keys(&schema, &["$ref", "definitions", "$defs"], "", &mut hits);
         assert!(
@@ -1706,33 +1742,27 @@ fn advertised_schemas_carry_no_refs() {
 
 /// Strict provider validators also want a concrete `type` on the root object and
 /// on every property — an `anyOf`-only property (what `Option<Manifest>` used to
-/// render as) is rejected the same way a `$ref` is. A `properties` key is
-/// required too, even on a tool that takes no arguments (OpenAI strict mode).
+/// render as) is rejected the same way a `$ref` is, at any depth. A `properties`
+/// key is required too, even on a tool that takes no arguments (OpenAI strict).
 #[test]
 fn advertised_schemas_type_every_property() {
     let (_tmp, paths) = temp_paths();
     let server = LibrarianServer::new(paths);
+    let tools = server.advertised_tools();
+    assert!(!tools.is_empty());
 
-    for tool in &server.advertised_tools() {
+    for tool in &tools {
         assert_eq!(
             tool.input_schema.get("type").and_then(|t| t.as_str()),
             Some("object"),
             "{}: root schema is not type=object",
             tool.name
         );
-        let props = tool
-            .input_schema
+        tool.input_schema
             .get("properties")
-            .unwrap_or_else(|| panic!("{}: root schema has no `properties`", tool.name))
-            .as_object()
-            .unwrap_or_else(|| panic!("{}: `properties` is not an object", tool.name));
-        for (name, prop) in props {
-            assert!(
-                prop.get("type").is_some(),
-                "{}: property `{name}` has no `type`: {prop}",
-                tool.name
-            );
-        }
+            .unwrap_or_else(|| panic!("{}: root schema has no `properties`", tool.name));
+        let schema = serde_json::Value::Object((*tool.input_schema).clone());
+        assert_typed(&schema, "", &tool.name);
     }
 }
 
@@ -1747,7 +1777,8 @@ async fn serve_wire_frame_is_ref_free() {
         .arg("serve")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit())
+        .kill_on_drop(true)
         .spawn()
         .expect("spawn mcp-librarian serve");
 
@@ -1785,10 +1816,19 @@ async fn serve_wire_frame_is_ref_free() {
     let _ = child.kill().await;
 
     let frame: serde_json::Value = serde_json::from_str(&line).unwrap();
-    let tools = frame["result"]["tools"].as_array().expect("tools array");
-    assert_eq!(tools.len(), 13);
+    let tools = frame["result"]["tools"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no tools array in {line}"));
+    let (_tmp2, paths) = temp_paths();
+    assert_eq!(
+        tools.len(),
+        LibrarianServer::new(paths).advertised_tools().len()
+    );
 
-    let mut hits = Vec::new();
-    find_keys(&frame, &["$ref", "definitions", "$defs"], "", &mut hits);
-    assert!(hits.is_empty(), "tools/list frame carries refs: {hits:?}");
+    for tool in tools {
+        let name = tool["name"].as_str().unwrap_or("<unnamed>");
+        let mut hits = Vec::new();
+        find_keys(tool, &["$ref", "definitions", "$defs"], "", &mut hits);
+        assert!(hits.is_empty(), "{name}: wire frame carries refs: {hits:?}");
+    }
 }
