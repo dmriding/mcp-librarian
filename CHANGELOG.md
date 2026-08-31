@@ -4,6 +4,10 @@ All notable changes to this project will be documented here. Format follows [Kee
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-08-31
+
+Schema-portability fix. Clients that sanitize schemas before forwarding them were unaffected; clients that forward them verbatim to a strict provider could not use this server at all.
+
 ### Fixed
 - **Advertised tool schemas are self-contained — no draft-07 `$ref`/`definitions`.** schemars' default generator hoisted named types (`NoteBasis`, `NoteKind`, `Manifest`, `SeedTool`, `SeedParams`) into a root `definitions` block and pointed at them with `$ref`. MCP clients that forward `inputSchema` verbatim into an LLM provider's `tools` array hit provider-side validators that only resolve `#/$defs`-style refs, and the rejection lands on the *whole chat request*, not the one tool (Moonshot reports it as "detected infinite recursion"). Every tool now advertises an inlined schema. `NoteBasis` also renders as a plain `{"type": "string", "enum": [...]}` instead of a `oneOf` of `const` strings, and `manifest` on `librarian_manifest_write` carries an explicit `type` instead of a typeless `anyOf`. Argument shapes are otherwise unchanged, with one narrowing: the advertised schema for `manifest` no longer permits an explicit `null` — omit the field instead (the server still accepts null either way) (MoonshotAI/kimi-cli#1595).
 - **No-argument tools advertise `properties`.** `librarian_onboarding` advertised a bare `{"type": "object"}` with no `properties` key; OpenAI strict function calling and other provider subsets require it even when empty. Root schemas now always carry the key. Map-typed properties are untouched — their constraint lives in `additionalProperties`.
